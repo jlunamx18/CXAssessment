@@ -52,9 +52,9 @@ def get_samsara_trips(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
             Fecha_Creo_Registro,
             Ultimo_Cambio_Fecha
         FROM vwBI_samsaraTrips
-        WHERE startMs >= %s
-          AND startMs <= %s
-        ORDER BY startMs DESC
+        WHERE Fecha_Creo_Registro >= %s
+          AND Fecha_Creo_Registro <= %s
+        ORDER BY Fecha_Creo_Registro DESC
     """
     return run_query(sql, params=(fecha_inicio, fecha_fin))
 
@@ -81,15 +81,15 @@ def get_plan_vs_real(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
             ISNULL(s.distanceMeters, 0) / 1609.34               AS milesGPS,
             DATEDIFF(MINUTE, t.fechaInicio, t.fechaTermino)
                 / 60.0                                          AS horasPlaneadas,
-            DATEDIFF(MINUTE, s.startMs, s.endMs)
+            DATEDIFF(MINUTE, TRY_CONVERT(datetime, s.startMs), TRY_CONVERT(datetime, s.endMs))
                 / 60.0                                          AS horasReales,
             (ISNULL(s.distanceMeters, 0) / 1609.34)
                 - ISNULL(t.totalMiles, 0)                       AS diferenciaMillas
         FROM vwBI_trnViajes t
         INNER JOIN vwBI_samsaraTrips s
             ON t.idTransporte = s.idTransporte
-        WHERE s.startMs >= %s
-          AND s.startMs <= %s
+        WHERE s.Fecha_Creo_Registro >= %s
+          AND s.Fecha_Creo_Registro <= %s
           AND t.fechaInicio >= %s
           AND t.fechaInicio <= %s
         ORDER BY t.idViaje DESC
@@ -110,8 +110,8 @@ def get_distancia_por_vehiculo(fecha_inicio: str, fecha_fin: str) -> pd.DataFram
             ON s.idTransporte = t.idTransporte
            AND t.fechaInicio >= %s
            AND t.fechaInicio <= %s
-        WHERE s.startMs >= %s
-          AND s.startMs <= %s
+        WHERE s.Fecha_Creo_Registro >= %s
+          AND s.Fecha_Creo_Registro <= %s
         GROUP BY s.idTransporte
         ORDER BY milesGPS DESC
     """

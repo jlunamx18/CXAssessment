@@ -113,7 +113,6 @@ def get_viajes(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
             honorariosOperador_2_TipoCambio,
             costoPerMile,
             revenuePerMile,
-            grossAver,
             comisionRenta,
             costoRenta,
             tolls,
