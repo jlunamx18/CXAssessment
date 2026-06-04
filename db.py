@@ -34,15 +34,34 @@ def run_query(sql: str, params: Optional[tuple] = None) -> pd.DataFrame:
     """
     Execute a SQL query and return results as a DataFrame.
     Results are cached for CACHE_TTL seconds.
+
+    pymssql uses %s placeholders and requires cursor-based execution;
+    pd.read_sql is used with the connection for convenience but params
+    are substituted via cursor when needed.
     """
     try:
         conn = get_connection()
-        df = pd.read_sql(sql, conn, params=params)
-        conn.close()
+        try:
+            if params:
+                cursor = conn.cursor()
+                cursor.execute(sql, params)
+                columns = [desc[0] for desc in cursor.description]
+                rows = cursor.fetchall()
+                df = pd.DataFrame(rows, columns=columns)
+                cursor.close()
+            else:
+                df = pd.read_sql(sql, conn)
+        finally:
+            conn.close()
         return df
-    except Exception:
-        st.error("Error al conectar con la base de datos. Verifique la conexión.")
-        st.code(traceback.format_exc(), language="text")
+    except Exception as exc:
+        error_msg = str(exc)
+        st.error(
+            f"Error al conectar con la base de datos: {error_msg}\n\n"
+            "Verifique que el servidor SQL Server esté accesible y las credenciales sean correctas."
+        )
+        with st.expander("Detalle técnico del error"):
+            st.code(traceback.format_exc(), language="text")
         return pd.DataFrame()
 
 

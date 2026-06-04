@@ -22,7 +22,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# ── Sidebar brand ─────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown(
         """
@@ -39,7 +39,7 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.divider()
-    st.markdown("**Filtros**")
+    st.markdown("**Filtros de fecha**")
 
     hoy = datetime.date.today()
     hace_30 = hoy - datetime.timedelta(days=30)
@@ -50,20 +50,6 @@ with st.sidebar:
     if fecha_inicio > fecha_fin:
         st.error("La fecha de inicio debe ser anterior a la fecha fin.")
         st.stop()
-
-    tipo_viaje_filtro = st.multiselect(
-        "Tipo de viaje",
-        options=[],
-        placeholder="Todos los tipos",
-        key="viajes_tipo",
-    )
-
-    activo_filtro = st.selectbox(
-        "Estado del viaje",
-        options=["Todos", "Activos", "Inactivos"],
-        index=0,
-        key="viajes_activo",
-    )
 
     if st.button("🔄 Actualizar datos", key="viajes_refresh"):
         st.cache_data.clear()
@@ -83,19 +69,27 @@ if df.empty:
     st.warning("No se encontraron viajes para el período seleccionado.")
     st.stop()
 
-# ── Apply sidebar filters ─────────────────────────────────────────────────────
-# Populate tipo_viaje options dynamically after data loads
-tipos_disponibles = sorted(df["tipoViaje"].dropna().unique().tolist())
-
-# Re-render tipo_viaje multiselect with actual options using session state trick
+# ── Sidebar filters (populated after data loads) ──────────────────────────────
 with st.sidebar:
+    st.markdown("**Filtros adicionales**")
+
+    tipos_disponibles = sorted(df["tipoViaje"].dropna().unique().tolist())
     tipo_viaje_sel = st.multiselect(
-        "Tipo de viaje (opciones)",
+        "Tipo de viaje",
         options=tipos_disponibles,
+        default=[],
         placeholder="Todos los tipos",
-        key="viajes_tipo_real",
+        key="viajes_tipo",
     )
 
+    activo_filtro = st.selectbox(
+        "Estado del viaje",
+        options=["Todos", "Activos", "Inactivos"],
+        index=0,
+        key="viajes_activo",
+    )
+
+# ── Apply filters ─────────────────────────────────────────────────────────────
 df_filtered = df.copy()
 
 if tipo_viaje_sel:
@@ -114,33 +108,40 @@ for col in ["fechaInicio", "fechaTermino"]:
 if "fechaInicio" in df_filtered.columns and "fechaTermino" in df_filtered.columns:
     df_filtered["dias_en_transito"] = (
         df_filtered["fechaTermino"] - df_filtered["fechaInicio"]
-    ).dt.days
+    ).dt.days.clip(lower=0)
 
 # ── Summary metrics ───────────────────────────────────────────────────────────
-total_viajes   = len(df_filtered)
-total_rev      = df_filtered["totalRevenue"].sum() if "totalRevenue" in df_filtered.columns else 0
-total_exp      = df_filtered["totalExpenses"].sum() if "totalExpenses" in df_filtered.columns else 0
-total_millas   = df_filtered["totalMiles"].sum() if "totalMiles" in df_filtered.columns else 0
-avg_dias       = df_filtered["dias_en_transito"].mean() if "dias_en_transito" in df_filtered.columns else 0
+total_viajes = len(df_filtered)
+total_rev    = float(df_filtered["totalRevenue"].fillna(0).sum()) if "totalRevenue" in df_filtered.columns else 0.0
+total_exp    = float(df_filtered["totalExpenses"].fillna(0).sum()) if "totalExpenses" in df_filtered.columns else 0.0
+total_millas = float(df_filtered["totalMiles"].fillna(0).sum()) if "totalMiles" in df_filtered.columns else 0.0
+avg_dias     = float(df_filtered["dias_en_transito"].dropna().mean()) if "dias_en_transito" in df_filtered.columns else 0.0
+margen       = total_rev - total_exp
 
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col3, col4, col5, col6 = st.columns(6)
 col1.metric("Viajes en período", f"{total_viajes:,}")
-col2.metric("Ingresos totales (USD)", f"${total_rev:,.2f}")
-col3.metric("Gastos totales (USD)", f"${total_exp:,.2f}")
-col4.metric("Millas totales", f"{total_millas:,.0f}")
-col5.metric("Promedio días en tránsito", f"{avg_dias:.1f} días")
+col2.metric("Ingresos (USD)", f"${total_rev:,.2f}")
+col3.metric("Gastos (USD)", f"${total_exp:,.2f}")
+col4.metric("Margen (USD)", f"${margen:,.2f}")
+col5.metric("Millas totales", f"{total_millas:,.0f}")
+col6.metric("Prom. días tránsito", f"{avg_dias:.1f} días")
 
 st.divider()
 
 # ── Revenue vs Expenses per trip chart ───────────────────────────────────────
-st.subheader("Ingresos vs Gastos por viaje")
+st.subheader("Ingresos vs Gastos por viaje (Top 100 por ingresos)")
 
 chart_cols = ["idViaje", "totalRevenue", "totalExpenses"]
 chart_ok = all(c in df_filtered.columns for c in chart_cols)
 
 if chart_ok and not df_filtered.empty:
-    df_chart = df_filtered[chart_cols].dropna(subset=["totalRevenue", "totalExpenses"]).copy()
-    df_chart = df_chart.sort_values("totalRevenue", ascending=False).head(100)
+    df_chart = (
+        df_filtered[chart_cols]
+        .dropna(subset=["totalRevenue", "totalExpenses"])
+        .sort_values("totalRevenue", ascending=False)
+        .head(100)
+        .copy()
+    )
     df_chart["idViaje"] = df_chart["idViaje"].astype(str)
 
     df_melted = df_chart.melt(
@@ -166,16 +167,59 @@ if chart_ok and not df_filtered.empty:
     fig.update_layout(
         xaxis_tickangle=-45,
         margin=dict(t=20, b=10),
-        xaxis_title="ID Viaje (Top 100 por ingresos)",
+        xaxis_title="ID Viaje",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("No hay datos suficientes para el gráfico de ingresos vs gastos.")
 
+# ── Revenue vs Expenses scatter (all trips) ───────────────────────────────────
+if "totalRevenue" in df_filtered.columns and "totalExpenses" in df_filtered.columns:
+    st.subheader("Dispersión: Ingresos vs Gastos por viaje")
+    df_scatter_viajes = df_filtered[
+        ["idViaje", "totalRevenue", "totalExpenses", "tipoViaje", "totalMiles"]
+    ].dropna(subset=["totalRevenue", "totalExpenses"]).copy()
+    df_scatter_viajes["idViaje"] = df_scatter_viajes["idViaje"].astype(str)
+    df_scatter_viajes["margen"] = df_scatter_viajes["totalRevenue"] - df_scatter_viajes["totalExpenses"]
+
+    fig_sc = px.scatter(
+        df_scatter_viajes,
+        x="totalExpenses",
+        y="totalRevenue",
+        color="tipoViaje",
+        hover_name="idViaje",
+        hover_data={"totalMiles": ":.0f", "margen": ":$.2f"},
+        labels={
+            "totalExpenses": "Gastos (USD)",
+            "totalRevenue": "Ingresos (USD)",
+            "tipoViaje": "Tipo Viaje",
+        },
+        opacity=0.75,
+        height=420,
+    )
+    # Draw the break-even line
+    max_val = max(
+        df_scatter_viajes["totalRevenue"].max(),
+        df_scatter_viajes["totalExpenses"].max(),
+    )
+    import plotly.graph_objects as go
+    fig_sc.add_trace(
+        go.Scatter(
+            x=[0, max_val],
+            y=[0, max_val],
+            mode="lines",
+            name="Punto de equilibrio",
+            line=dict(dash="dash", color="gray", width=1),
+        )
+    )
+    fig_sc.update_layout(margin=dict(t=20, b=10))
+    st.plotly_chart(fig_sc, use_container_width=True)
+
 st.divider()
 
 # ── Trips table ───────────────────────────────────────────────────────────────
-st.subheader("Tabla de viajes")
+st.subheader(f"Tabla de viajes ({total_viajes:,} registros)")
 
 display_cols = [
     c for c in [
@@ -210,16 +254,15 @@ for dcol in ["fechaInicio", "fechaTermino"]:
 for money_col in ["totalRevenue", "totalExpenses", "revenuePerMile", "costoPerMile"]:
     if money_col in df_display.columns:
         df_display[money_col] = df_display[money_col].apply(
-            lambda x: f"${x:,.2f}" if pd.notna(x) else ""
+            lambda x: f"${x:,.2f}" if pd.notna(x) else "—"
         )
 
 for mi_col in ["totalMiles"]:
     if mi_col in df_display.columns:
         df_display[mi_col] = df_display[mi_col].apply(
-            lambda x: f"{x:,.0f}" if pd.notna(x) else ""
+            lambda x: f"{x:,.0f}" if pd.notna(x) else "—"
         )
 
-# Rename columns to Spanish
 rename_map = {
     "idViaje": "ID Viaje",
     "idTransporte": "Unidad",
@@ -238,9 +281,12 @@ rename_map = {
     "tipoPago": "Tipo Pago",
     "activo": "Activo",
 }
-df_display = df_display.rename(columns={k: v for k, v in rename_map.items() if k in df_display.columns})
+df_display = df_display.rename(
+    columns={k: v for k, v in rename_map.items() if k in df_display.columns}
+)
 
 st.dataframe(df_display, use_container_width=True, hide_index=True)
 st.caption(
-    f"Mostrando {len(df_filtered):,} viajes · Todos los montos en USD · Fuente: vwBI_trnViajes"
+    f"Mostrando {total_viajes:,} viajes · Montos en USD · "
+    "Fuente: vwBI_trnViajes"
 )
