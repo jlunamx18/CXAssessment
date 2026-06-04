@@ -223,8 +223,7 @@ fig.update_layout(
         ticktext=x_labels,
         tickfont=dict(size=11),
         side="top",
-        title="Día del mes",
-        titlefont=dict(size=11),
+        title=dict(text="Día del mes", font=dict(size=11)),
     ),
     yaxis=dict(
         tickfont=dict(size=11),
