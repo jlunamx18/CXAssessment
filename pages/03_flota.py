@@ -129,7 +129,7 @@ with col_left:
         x="total_revenue",
         y="etiqueta",
         orientation="h",
-        text=df_rev["total_revenue"].apply(lambda x: f"${x:,.0f}"),
+        text=df_rev["total_revenue"].apply(lambda x: f"${x:,.0f}" if pd.notna(x) else "—"),
         labels={"total_revenue": "Ingresos (USD)", "etiqueta": "Unidad"},
         color="total_revenue",
         color_continuous_scale="RdYlGn",
@@ -214,7 +214,7 @@ df_table["total_miles"] = df_table["total_miles"].apply(
     lambda x: f"{x:,.0f}" if pd.notna(x) else "—"
 )
 df_table["pct_utilizacion"] = df_table["pct_utilizacion"].apply(
-    lambda x: f"{x:.1f}%"
+    lambda x: f"{x:.1f}%" if pd.notna(x) else "—"
 )
 
 df_table = df_table.rename(columns={

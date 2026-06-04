@@ -138,7 +138,7 @@ with col_left:
             x="Monto",
             y="Concepto",
             orientation="h",
-            text=df_usd["Monto"].apply(lambda x: f"${x:,.2f}"),
+            text=df_usd["Monto"].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else "—"),
             labels={"Monto": "Monto (USD)", "Concepto": ""},
             color="Monto",
             color_continuous_scale="Reds",
@@ -165,7 +165,7 @@ with col_left:
                 x="Monto",
                 y="Concepto",
                 orientation="h",
-                text=df_mxp["Monto"].apply(lambda x: f"${x:,.2f}"),
+                text=df_mxp["Monto"].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else "—"),
                 labels={"Monto": "Monto (MXP)", "Concepto": ""},
                 color="Monto",
                 color_continuous_scale="Oranges",
@@ -305,7 +305,7 @@ rows_mxp = [
 df_breakdown = pd.DataFrame(rows_usd + rows_mxp)
 if not df_breakdown.empty:
     df_breakdown = df_breakdown.sort_values(["Moneda", "Monto"], ascending=[True, False])
-    df_breakdown["Monto"] = df_breakdown["Monto"].apply(lambda x: f"${x:,.2f}")
+    df_breakdown["Monto"] = df_breakdown["Monto"].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else "—")
     st.dataframe(df_breakdown, use_container_width=True, hide_index=True)
 else:
     st.info("Sin datos de desglose disponibles.")
