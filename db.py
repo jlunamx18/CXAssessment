@@ -416,6 +416,112 @@ def get_choferes_catalogo() -> pd.DataFrame:
     return run_query(sql)
 
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_tms_dias_por_unidad(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
+    """Days with TMS activity per unit — deduplicated by idViaje."""
+    sql = """
+        SELECT
+            v.idTransporte,
+            t.nombre        AS nombreUnidad,
+            t.codigo        AS codigoUnidad,
+            CAST(v.fechaInicio AS DATE) AS dia,
+            COUNT(DISTINCT v.idViaje)   AS viajes_dia,
+            SUM(v.totalMiles)           AS miles_dia,
+            SUM(v.totalMillasRecorridas) AS km_dia,
+            MIN(v.tipoViaje)            AS tipo_viaje
+        FROM (
+            SELECT DISTINCT idViaje, idTransporte, fechaInicio,
+                   totalMiles, totalMillasRecorridas, tipoViaje
+            FROM vwBI_trnViajes
+            WHERE fechaInicio >= %s AND fechaInicio <= %s
+              AND idTransporte IS NOT NULL AND idTransporte > 0
+        ) v
+        LEFT JOIN vwBI_trnTransporte t ON v.idTransporte = t.idTransporte
+        GROUP BY v.idTransporte, t.nombre, t.codigo, CAST(v.fechaInicio AS DATE)
+        ORDER BY v.idTransporte, dia
+    """
+    return run_query(sql, (fecha_inicio, fecha_fin))
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_gps_dias_por_unidad(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
+    """Days with GPS activity per unit."""
+    sql = """
+        SELECT
+            s.idTransporte,
+            t.nombre        AS nombreUnidad,
+            t.codigo        AS codigoUnidad,
+            CAST(s.Fecha_Creo_Registro AS DATE) AS dia,
+            COUNT(*)                        AS tramos_gps,
+            SUM(ISNULL(s.distanceMeters,0)) AS metros_gps,
+            SUM(ISNULL(s.distanceMeters,0)) / 1609.34 AS miles_gps,
+            SUM(ISNULL(s.distanceMeters,0)) / 1000.0  AS km_gps
+        FROM vwBI_samsaraTrips s
+        LEFT JOIN vwBI_trnTransporte t ON s.idTransporte = t.idTransporte
+        WHERE s.Fecha_Creo_Registro >= %s
+          AND s.Fecha_Creo_Registro <= %s
+          AND ISNULL(s.distanceMeters, 0) > 0
+        GROUP BY s.idTransporte, t.nombre, t.codigo, CAST(s.Fecha_Creo_Registro AS DATE)
+        ORDER BY s.idTransporte, dia
+    """
+    return run_query(sql, (fecha_inicio, fecha_fin))
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_resumen_tms_por_unidad(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
+    """Monthly TMS summary per unit — deduplicated."""
+    sql = """
+        SELECT
+            v.idTransporte,
+            t.nombre        AS nombreUnidad,
+            t.codigo        AS codigoUnidad,
+            COUNT(DISTINCT v.idViaje)               AS total_viajes,
+            COUNT(DISTINCT CAST(v.fechaInicio AS DATE)) AS dias_con_viaje,
+            SUM(v.totalMiles)                       AS total_miles,
+            SUM(v.totalMillasRecorridas)            AS total_km,
+            SUM(v.totalRevenue)                     AS total_revenue,
+            SUM(v.totalExpenses)                    AS total_expenses,
+            MIN(v.fechaInicio)                      AS primer_viaje,
+            MAX(v.fechaInicio)                      AS ultimo_viaje
+        FROM (
+            SELECT DISTINCT idViaje, idTransporte, fechaInicio,
+                   totalMiles, totalMillasRecorridas, totalRevenue, totalExpenses
+            FROM vwBI_trnViajes
+            WHERE fechaInicio >= %s AND fechaInicio <= %s
+              AND idTransporte IS NOT NULL AND idTransporte > 0
+        ) v
+        LEFT JOIN vwBI_trnTransporte t ON v.idTransporte = t.idTransporte
+        GROUP BY v.idTransporte, t.nombre, t.codigo
+        ORDER BY total_viajes DESC
+    """
+    return run_query(sql, (fecha_inicio, fecha_fin))
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_resumen_gps_por_unidad(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
+    """GPS summary per unit for the period."""
+    sql = """
+        SELECT
+            s.idTransporte,
+            t.nombre        AS nombreUnidad,
+            t.codigo        AS codigoUnidad,
+            COUNT(DISTINCT CAST(s.Fecha_Creo_Registro AS DATE)) AS dias_activos_gps,
+            COUNT(*)                        AS total_tramos_gps,
+            SUM(ISNULL(s.distanceMeters,0)) / 1000.0  AS total_km_gps,
+            SUM(ISNULL(s.distanceMeters,0)) / 1609.34 AS total_miles_gps,
+            MIN(s.Fecha_Creo_Registro)      AS primer_gps,
+            MAX(s.Fecha_Creo_Registro)      AS ultimo_gps
+        FROM vwBI_samsaraTrips s
+        LEFT JOIN vwBI_trnTransporte t ON s.idTransporte = t.idTransporte
+        WHERE s.Fecha_Creo_Registro >= %s
+          AND s.Fecha_Creo_Registro <= %s
+          AND ISNULL(s.distanceMeters, 0) > 0
+        GROUP BY s.idTransporte, t.nombre, t.codigo
+        ORDER BY dias_activos_gps DESC
+    """
+    return run_query(sql, (fecha_inicio, fecha_fin))
+
+
 def test_connection() -> bool:
     """Test database connectivity. Returns True if successful."""
     try:
