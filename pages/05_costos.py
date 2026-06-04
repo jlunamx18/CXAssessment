@@ -1,5 +1,7 @@
 """
 Costos — Cost analysis page.
+Uses get_costos_dedup() and get_costos_por_mes() with proper trip deduplication.
+Costs are summed once per idViaje — no double-counting.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from db import get_costos_desglose, get_costos_por_semana
+from db import get_costos_dedup, get_costos_por_mes
 
 st.set_page_config(
     page_title="Costos · Transport Analytics",
@@ -43,180 +45,158 @@ with st.sidebar:
     st.markdown("**Filtros**")
 
     hoy = datetime.date.today()
-    hace_30 = hoy - datetime.timedelta(days=30)
+    primer_dia_mes = hoy.replace(day=1)
 
-    fecha_inicio = st.date_input("Fecha inicio", value=hace_30, key="costos_fi")
-    fecha_fin    = st.date_input("Fecha fin",    value=hoy,     key="costos_ff")
+    fecha_inicio = st.date_input("Fecha inicio", value=primer_dia_mes, key="costos_fi")
+    fecha_fin    = st.date_input("Fecha fin",    value=hoy,            key="costos_ff")
 
     if fecha_inicio > fecha_fin:
         st.error("La fecha de inicio debe ser anterior a la fecha fin.")
         st.stop()
 
-    moneda_vista = st.radio(
-        "Vista de moneda",
-        options=["USD (Dólares)", "MXP (Pesos)", "Ambas"],
-        index=0,
-        help="Selecciona la moneda para visualizar los costos. "
-             "Algunos campos ya están en USD, otros en MXP según el origen del gasto.",
-    )
-
-    if st.button("🔄 Actualizar datos", key="costos_refresh"):
+    if st.button("Actualizar datos", key="costos_refresh"):
         st.cache_data.clear()
+        st.rerun()
 
 # ── Page header ───────────────────────────────────────────────────────────────
 st.title("💰 Análisis de Costos Operativos")
 st.caption(f"Período: {fecha_inicio.strftime('%d/%m/%Y')} — {fecha_fin.strftime('%d/%m/%Y')}")
+st.info(
+    "Costos deduplicados por viaje: cada costo se contabiliza una sola vez por idViaje, "
+    "sin importar cuántas peticiones tenga el viaje.",
+    icon="ℹ️",
+)
 
 fi_str = fecha_inicio.strftime("%Y-%m-%d")
 ff_str = fecha_fin.strftime("%Y-%m-%d")
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 with st.spinner("Cargando costos..."):
-    df_desglose  = get_costos_desglose(fi_str, ff_str)
-    df_tendencia = get_costos_por_semana(fi_str, ff_str)
+    df_costos  = get_costos_dedup(fi_str, ff_str)
+    df_mensual = get_costos_por_mes(fi_str, ff_str)
 
-if df_desglose.empty:
+if df_costos.empty:
     st.warning("No se encontraron datos de costos para el período seleccionado.")
     st.stop()
 
-row = df_desglose.iloc[0]
+row = df_costos.iloc[0]
 
-# ── Helper to safely get float ────────────────────────────────────────────────
 def val(key: str) -> float:
     v = row.get(key, 0)
     return float(v) if pd.notna(v) else 0.0
 
 # ── Build cost categories ─────────────────────────────────────────────────────
 costos_usd = {
-    "Diesel (USD)":         val("diesel_usd") + val("diesel_usd2"),
-    "Casetas (USD)":        val("casetas_usd"),
-    "Honorarios Op.1 (USD)":val("honorarios_op1"),
-    "Honorarios Op.2 (USD)":val("honorarios_op2"),
-    "Tolls (USD)":          val("tolls"),
-    "Scales (USD)":         val("scales"),
-    "Lumper (USD)":         val("lumper"),
-    "Misceláneos (USD)":    val("misc"),
-    "Partes (USD)":         val("parts"),
-    "NTS Fees (USD)":       val("ntsfees"),
-    "TK Lube (USD)":        val("tklube"),
-    "Advance (USD)":        val("advance"),
-    "Viáticos (USD)":       val("viaticos_usd"),
-    "Permiso Placas (USD)": val("permiso_placas_usd"),
-    "Gtos Varios USA (USD)":val("gtos_varios_usa"),
-    "Cuota (USD)":          val("cuota_usd"),
+    "Diesel (USD)":          val("diesel"),
+    "Casetas USD":           val("casetasUSD"),
+    "Honorarios operadores": val("honorarios"),
+    "Viáticos USD":          val("viaticosUSD"),
+    "Tolls (USD)":           val("tolls"),
+    "Scales (USD)":          val("scales"),
+    "Lumper (USD)":          val("lumper"),
+    "Misceláneos (USD)":     val("misc"),
+    "Renta (USD)":           val("renta"),
 }
 
 costos_mxp = {
-    "Diesel (MXP)":           val("diesel_mxp"),
-    "Casetas (MXP)":          val("casetas_mxp"),
-    "Casetas ViaPass (MXP)":  val("casetas_viapass_mxp"),
-    "Viáticos (MXP)":         val("viaticos_mxp"),
+    "Casetas MXP":   val("casetasMXP"),
+    "Viáticos MXP":  val("viaticosMXP"),
 }
 
 total_expenses = val("total_expenses")
+total_revenue  = val("total_revenue")
+total_honorarios = val("honorarios")
+total_diesel = val("diesel")
+total_casetas = val("casetasUSD") + val("casetasMXP") / 17  # approximate
 
 # ── Summary KPIs ──────────────────────────────────────────────────────────────
-total_costos_usd = sum(costos_usd.values())
-total_costos_mxp = sum(costos_mxp.values())
-total_diesel     = val("diesel_usd") + val("diesel_usd2") + val("diesel_mxp") / 17  # rough estimate
-total_casetas    = val("casetas_usd") + val("casetas_mxp") / 17
-total_honorarios = val("honorarios_op1") + val("honorarios_op2")
+margen = total_revenue - total_expenses
+margen_pct = (margen / total_revenue * 100) if total_revenue else 0
 
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Gastos totales (USD)", f"${total_expenses:,.2f}")
-col2.metric("Suma costos en USD", f"${total_costos_usd:,.2f}")
-col3.metric("Suma costos en MXP", f"${total_costos_mxp:,.2f}")
-col4.metric("Total honorarios operadores (USD)", f"${total_honorarios:,.2f}")
-col5.metric("Total casetas (USD)", f"${val('casetas_usd'):,.2f}")
-
-st.info(
-    "Nota: Los costos en MXP (pesos mexicanos) se muestran en su moneda original. "
-    "Los costos en USD son dólares americanos. No se aplica conversión automática.",
-    icon="ℹ️",
-)
+col2.metric("Ingresos totales (USD)", f"${total_revenue:,.2f}")
+col3.metric("Margen (USD)", f"${margen:,.2f}", delta=f"{margen_pct:.1f}%")
+col4.metric("Honorarios operadores (USD)", f"${total_honorarios:,.2f}")
+col5.metric("Diesel (USD)", f"${total_diesel:,.2f}")
 
 st.divider()
 
-# ── Desglose de costos — Stacked / Pie ───────────────────────────────────────
+# ── Cost breakdown pie + bar ──────────────────────────────────────────────────
 col_left, col_right = st.columns([2, 1])
 
 with col_left:
-    st.subheader("Desglose de costos operativos")
+    st.subheader("Desglose de costos en USD")
+    df_usd = pd.DataFrame(
+        {"Concepto": list(costos_usd.keys()), "Monto": list(costos_usd.values())}
+    )
+    df_usd = df_usd[df_usd["Monto"] > 0].sort_values("Monto", ascending=True)
 
-    if moneda_vista in ("USD (Dólares)", "Ambas"):
-        df_usd = pd.DataFrame(
-            {"Categoría": list(costos_usd.keys()), "Monto": list(costos_usd.values())}
+    if not df_usd.empty:
+        fig_bar_usd = px.bar(
+            df_usd,
+            x="Monto",
+            y="Concepto",
+            orientation="h",
+            text=df_usd["Monto"].apply(lambda x: f"${x:,.2f}"),
+            labels={"Monto": "Monto (USD)", "Concepto": ""},
+            color="Monto",
+            color_continuous_scale="Reds",
+            height=max(300, len(df_usd) * 35),
         )
-        df_usd = df_usd[df_usd["Monto"] > 0].sort_values("Monto", ascending=True)
+        fig_bar_usd.update_traces(textposition="outside")
+        fig_bar_usd.update_layout(
+            coloraxis_showscale=False,
+            margin=dict(t=20, b=10, l=10, r=60),
+        )
+        st.plotly_chart(fig_bar_usd, use_container_width=True)
+    else:
+        st.info("Sin costos USD para el período.")
 
-        if not df_usd.empty:
-            fig_h_usd = px.bar(
-                df_usd,
-                x="Monto",
-                y="Categoría",
-                orientation="h",
-                text=df_usd["Monto"].apply(lambda x: f"${x:,.2f}"),
-                labels={"Monto": "Monto (USD)", "Categoría": ""},
-                color="Monto",
-                color_continuous_scale="Reds",
-                title="Costos en USD",
-                height=max(350, len(df_usd) * 28),
-            )
-            fig_h_usd.update_traces(textposition="outside")
-            fig_h_usd.update_layout(
-                coloraxis_showscale=False,
-                margin=dict(t=40, b=10, l=10, r=40),
-            )
-            st.plotly_chart(fig_h_usd, use_container_width=True)
-
-    if moneda_vista in ("MXP (Pesos)", "Ambas"):
+    if any(v > 0 for v in costos_mxp.values()):
+        st.subheader("Costos en MXP (Pesos Mexicanos)")
         df_mxp = pd.DataFrame(
-            {"Categoría": list(costos_mxp.keys()), "Monto": list(costos_mxp.values())}
+            {"Concepto": list(costos_mxp.keys()), "Monto": list(costos_mxp.values())}
         )
         df_mxp = df_mxp[df_mxp["Monto"] > 0].sort_values("Monto", ascending=True)
-
         if not df_mxp.empty:
-            fig_h_mxp = px.bar(
+            fig_bar_mxp = px.bar(
                 df_mxp,
                 x="Monto",
-                y="Categoría",
+                y="Concepto",
                 orientation="h",
                 text=df_mxp["Monto"].apply(lambda x: f"${x:,.2f}"),
-                labels={"Monto": "Monto (MXP)", "Categoría": ""},
+                labels={"Monto": "Monto (MXP)", "Concepto": ""},
                 color="Monto",
                 color_continuous_scale="Oranges",
-                title="Costos en MXP (Pesos Mexicanos)",
-                height=max(200, len(df_mxp) * 28),
+                height=max(200, len(df_mxp) * 35),
             )
-            fig_h_mxp.update_traces(textposition="outside")
-            fig_h_mxp.update_layout(
+            fig_bar_mxp.update_traces(textposition="outside")
+            fig_bar_mxp.update_layout(
                 coloraxis_showscale=False,
-                margin=dict(t=40, b=10, l=10, r=40),
+                margin=dict(t=20, b=10, l=10, r=60),
             )
-            st.plotly_chart(fig_h_mxp, use_container_width=True)
+            st.plotly_chart(fig_bar_mxp, use_container_width=True)
 
 with col_right:
     st.subheader("Distribución porcentual (USD)")
-    df_pie_data = pd.DataFrame(
-        {"Categoría": list(costos_usd.keys()), "Monto": list(costos_usd.values())}
+    df_pie = pd.DataFrame(
+        {"Concepto": list(costos_usd.keys()), "Monto": list(costos_usd.values())}
     )
-    df_pie_data = df_pie_data[df_pie_data["Monto"] > 0]
+    df_pie = df_pie[df_pie["Monto"] > 0]
 
-    if not df_pie_data.empty:
-        # Group small categories into "Otros"
-        threshold = df_pie_data["Monto"].sum() * 0.02
-        df_pie_main = df_pie_data[df_pie_data["Monto"] >= threshold]
-        df_pie_otros = df_pie_data[df_pie_data["Monto"] < threshold]
-
-        if not df_pie_otros.empty:
-            otros_row = pd.DataFrame(
-                [{"Categoría": "Otros", "Monto": df_pie_otros["Monto"].sum()}]
+    if not df_pie.empty:
+        threshold = df_pie["Monto"].sum() * 0.02
+        df_main = df_pie[df_pie["Monto"] >= threshold]
+        df_otros = df_pie[df_pie["Monto"] < threshold]
+        if not df_otros.empty:
+            df_main = pd.concat(
+                [df_main, pd.DataFrame([{"Concepto": "Otros", "Monto": df_otros["Monto"].sum()}])],
+                ignore_index=True,
             )
-            df_pie_main = pd.concat([df_pie_main, otros_row], ignore_index=True)
-
         fig_pie = px.pie(
-            df_pie_main,
-            names="Categoría",
+            df_main,
+            names="Concepto",
             values="Monto",
             hole=0.35,
             color_discrete_sequence=px.colors.qualitative.Set3,
@@ -229,82 +209,87 @@ with col_right:
         )
         st.plotly_chart(fig_pie, use_container_width=True)
     else:
-        st.info("Sin datos de costos USD para mostrar.")
+        st.info("Sin costos USD para mostrar.")
 
-# ── Weekly cost per mile trend ─────────────────────────────────────────────────
+# ── Monthly cost trend stacked bar ────────────────────────────────────────────
 st.divider()
-st.subheader("Tendencia semanal: Costo y Revenue por milla")
+st.subheader("Tendencia mensual de costos (USD)")
 
-if df_tendencia.empty:
-    st.info("Sin datos semanales para el período seleccionado.")
+if df_mensual.empty:
+    st.warning("Sin datos mensuales para el período seleccionado.")
 else:
-    df_tend = df_tendencia.copy()
-
-    if "semana_inicio" in df_tend.columns:
-        df_tend["semana_label"] = df_tend.apply(
-            lambda r: f"Sem {int(r['semana'])} ({r['semana_inicio']})"
-            if pd.notna(r.get("semana_inicio"))
-            else f"Sem {int(r['semana'])}",
-            axis=1,
-        )
-    else:
-        df_tend["semana_label"] = df_tend["semana"].apply(lambda x: f"Sem {int(x)}")
-
-    fig_trend = go.Figure()
-
-    fig_trend.add_trace(
-        go.Scatter(
-            x=df_tend["semana_label"],
-            y=df_tend["avg_costo_per_mile"],
-            mode="lines+markers",
-            name="Costo/Milla (USD)",
-            line=dict(color="#d62728", width=2),
-            marker=dict(size=8),
-        )
-    )
-    fig_trend.add_trace(
-        go.Scatter(
-            x=df_tend["semana_label"],
-            y=df_tend["avg_revenue_per_mile"],
-            mode="lines+markers",
-            name="Revenue/Milla (USD)",
-            line=dict(color="#2ca02c", width=2),
-            marker=dict(size=8),
-        )
+    MESES_ES = {
+        1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr",
+        5: "May", 6: "Jun", 7: "Jul", 8: "Ago",
+        9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic",
+    }
+    df_mensual["mes_label"] = df_mensual.apply(
+        lambda r: f"{MESES_ES.get(int(r['mes']), str(int(r['mes'])))} {int(r['anio'])}",
+        axis=1,
     )
 
-    fig_trend.update_layout(
-        height=380,
-        xaxis_title="Semana",
-        yaxis_title="USD por Milla",
+    # Stacked bar with cost components
+    cost_cols = {
+        "diesel":      "Diesel",
+        "honorarios":  "Honorarios",
+        "viaticos":    "Viáticos",
+        "renta":       "Renta",
+    }
+
+    df_plot = df_mensual[["mes_label"] + list(cost_cols.keys())].copy()
+    df_plot = df_plot.fillna(0)
+    df_melted = df_plot.melt(
+        id_vars="mes_label",
+        value_vars=list(cost_cols.keys()),
+        var_name="concepto_raw",
+        value_name="Monto",
+    )
+    df_melted["Concepto"] = df_melted["concepto_raw"].map(cost_cols)
+
+    fig_stack = px.bar(
+        df_melted,
+        x="mes_label",
+        y="Monto",
+        color="Concepto",
+        barmode="stack",
+        labels={"mes_label": "Mes", "Monto": "Monto (USD)"},
+        color_discrete_sequence=px.colors.qualitative.Set2,
+        height=400,
+    )
+    fig_stack.update_layout(
         xaxis_tickangle=-30,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        margin=dict(t=40, b=10),
-        hovermode="x unified",
+        margin=dict(t=20, b=10),
     )
-    st.plotly_chart(fig_trend, use_container_width=True)
+    st.plotly_chart(fig_stack, use_container_width=True)
 
-    # Weekly expenses bar chart
-    st.subheader("Gastos totales por semana (USD)")
-    fig_exp_bar = px.bar(
-        df_tend,
-        x="semana_label",
-        y="total_expenses",
-        text=df_tend["total_expenses"].apply(lambda x: f"${x:,.0f}"),
-        labels={"semana_label": "Semana", "total_expenses": "Gastos (USD)"},
-        color_discrete_sequence=["#e15759"],
-        height=340,
+    # Revenue vs Expenses monthly
+    st.subheader("Ingresos vs Gastos totales por mes (USD)")
+    df_rev_exp = df_mensual[["mes_label", "total_revenue", "total_expenses"]].copy().fillna(0)
+    df_rev_exp = df_rev_exp.rename(
+        columns={"total_revenue": "Ingresos", "total_expenses": "Gastos"}
     )
-    fig_exp_bar.update_traces(textposition="outside")
-    fig_exp_bar.update_layout(xaxis_tickangle=-30, margin=dict(t=20, b=10))
-    st.plotly_chart(fig_exp_bar, use_container_width=True)
+    df_rev_melt = df_rev_exp.melt(
+        id_vars="mes_label",
+        value_vars=["Ingresos", "Gastos"],
+        var_name="Categoria",
+        value_name="Monto (USD)",
+    )
+    fig_rev = px.bar(
+        df_rev_melt,
+        x="mes_label",
+        y="Monto (USD)",
+        color="Categoria",
+        barmode="group",
+        labels={"mes_label": "Mes"},
+        color_discrete_map={"Ingresos": "#2ca02c", "Gastos": "#d62728"},
+        height=380,
+    )
+    fig_rev.update_layout(xaxis_tickangle=-30, margin=dict(t=20, b=10))
+    st.plotly_chart(fig_rev, use_container_width=True)
 
 # ── Detailed cost table ────────────────────────────────────────────────────────
 st.divider()
-st.subheader("Tabla de desglose de costos — período completo")
-
-all_costs = {**costos_usd}
-all_costs_mxp = costos_mxp
+st.subheader("Desglose de costos — período completo")
 
 rows_usd = [
     {"Concepto": k, "Moneda": "USD", "Monto": v}
@@ -327,5 +312,7 @@ else:
 
 st.caption(
     f"Período: {fecha_inicio.strftime('%d/%m/%Y')} — {fecha_fin.strftime('%d/%m/%Y')} · "
-    "Fuente: vwBI_trnViajes · Montos USD = dólares americanos, MXP = pesos mexicanos"
+    "Costos deduplicados: suma una vez por idViaje · "
+    "USD = dólares americanos, MXP = pesos mexicanos · "
+    "Fuente: vwBI_trnViajes"
 )

@@ -1,6 +1,8 @@
 """
 Database connection and query helpers.
 Uses pymssql with st.cache_data for query caching.
+All trip counts use COUNT DISTINCT(idViaje).
+All cost/financial aggregations are deduplicated per trip.
 """
 
 from __future__ import annotations
@@ -34,10 +36,7 @@ def run_query(sql: str, params: Optional[tuple] = None) -> pd.DataFrame:
     """
     Execute a SQL query and return results as a DataFrame.
     Results are cached for CACHE_TTL seconds.
-
-    pymssql uses %s placeholders and requires cursor-based execution;
-    pd.read_sql is used with the connection for convenience but params
-    are substituted via cursor when needed.
+    pymssql uses %s placeholders.
     """
     try:
         conn = get_connection()
@@ -66,114 +65,106 @@ def run_query(sql: str, params: Optional[tuple] = None) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def get_viajes(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
-    """Fetch trips within a date range."""
+def get_viajes_dedup(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
+    """Trips deduplicated by idViaje with catalog name joins."""
     sql = """
         SELECT
-            idViaje,
-            idTransporte,
-            idChofer1,
-            idChofer2,
-            idTipoViaje,
-            idLugarOrigen,
-            idLugarDestino,
-            idPago,
-            idEmpresa,
-            folioContrato,
-            idViajeSubida,
-            fechaInicio,
-            fechaTermino,
-            fechaIniciaRegreso,
-            fechaLlegadasSeleccionada,
-            Fecha_Creo_Registro,
-            Ultimo_Cambio_Fecha,
-            tipoViaje,
-            tipoPago,
-            TRIPSUMMARY,
-            ObservacionesVentas,
-            COMPLEMENTOS,
-            EXPENSIVES,
-            empresaRenta,
-            comentariosRenta,
-            totalRevenue,
-            totalExpenses,
-            totalMiles,
-            totalMillasRecorridas,
-            totalFuel,
-            totalRenta,
-            diesel,
-            diselMX,
-            diselUSD,
-            CASETASDOLARESUSD,
-            CASETASPESOSMXP,
-            CASETAVIAPASSPESOSMXP,
-            honorariosOperador_1,
-            honorariosOperador_1_TipoCambio,
-            honorariosOperador_2,
-            honorariosOperador_2_TipoCambio,
-            costoPerMile,
-            revenuePerMile,
-            comisionRenta,
-            costoRenta,
-            tolls,
-            scales,
-            lumper,
-            misc,
-            parts,
-            ntsfees,
-            tklube,
-            advance,
-            viaticosDolares,
-            viaticosPesos,
-            PERMISODEPLACASUSD,
-            GTOSVARIOSUSA,
-            CUOTAUSD,
-            milesPerGat,
-            beginningOdometer,
-            activo
-        FROM vwBI_trnViajes
-        WHERE fechaInicio >= %s
-          AND fechaInicio <= %s
-        ORDER BY fechaInicio DESC
+            v.idViaje,
+            v.fechaInicio,
+            v.fechaTermino,
+            v.tipoViaje,
+            v.tipoPago,
+            v.idTransporte,
+            t.nombre        AS nombreUnidad,
+            t.placasMx      AS placasUnidad,
+            v.idChofer1,
+            c1.nombreCompleto AS nombreChofer1,
+            v.idChofer2,
+            c2.nombreCompleto AS nombreChofer2,
+            v.totalRevenue,
+            v.totalExpenses,
+            v.totalMiles,
+            v.totalMillasRecorridas,
+            v.totalFuel,
+            v.totalRenta,
+            v.diesel,
+            v.CASETASPESOSMXP,
+            v.CASETASDOLARESUSD,
+            v.honorariosOperador_1,
+            v.honorariosOperador_2,
+            v.viaticosPesos,
+            v.viaticosDolares,
+            v.tolls,
+            v.scales,
+            v.lumper,
+            v.misc,
+            v.advance,
+            v.activo,
+            v.TRIPSUMMARY
+        FROM (
+            SELECT DISTINCT
+                idViaje, fechaInicio, fechaTermino, tipoViaje, tipoPago,
+                idTransporte, idChofer1, idChofer2,
+                totalRevenue, totalExpenses, totalMiles, totalMillasRecorridas,
+                totalFuel, totalRenta, diesel, CASETASPESOSMXP, CASETASDOLARESUSD,
+                honorariosOperador_1, honorariosOperador_2,
+                viaticosPesos, viaticosDolares, tolls, scales, lumper, misc, advance,
+                activo, TRIPSUMMARY
+            FROM vwBI_trnViajes
+            WHERE fechaInicio >= %s AND fechaInicio <= %s
+        ) v
+        LEFT JOIN vwBI_trnTransporte t ON v.idTransporte = t.idTransporte
+        LEFT JOIN vwBI_catChoferes c1 ON v.idChofer1 = c1.idChofer
+        LEFT JOIN vwBI_catChoferes c2 ON v.idChofer2 = c2.idChofer
+        ORDER BY v.fechaInicio DESC
     """
-    return run_query(sql, params=(fecha_inicio, fecha_fin))
+    return run_query(sql, (fecha_inicio, fecha_fin))
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def get_viajes_kpis(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
-    """Aggregate KPIs for a date range."""
+def get_kpis_dedup(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
+    """KPIs with proper deduplication using COUNT DISTINCT(idViaje)."""
     sql = """
         SELECT
-            COUNT(idViaje)                              AS total_viajes,
-            SUM(ISNULL(totalRevenue, 0))               AS total_revenue,
-            SUM(ISNULL(totalExpenses, 0))              AS total_expenses,
-            SUM(ISNULL(totalRevenue, 0))
-              - SUM(ISNULL(totalExpenses, 0))          AS margen,
-            SUM(ISNULL(totalMiles, 0))                 AS total_millas,
-            AVG(ISNULL(revenuePerMile, 0))             AS avg_revenue_per_mile
-        FROM vwBI_trnViajes
-        WHERE fechaInicio >= %s
-          AND fechaInicio <= %s
+            COUNT(DISTINCT idViaje)                     AS total_viajes,
+            SUM(totalRevenue)                           AS total_revenue,
+            SUM(totalExpenses)                          AS total_expenses,
+            SUM(totalRevenue) - SUM(totalExpenses)      AS margen,
+            SUM(totalMiles)                             AS total_miles,
+            SUM(totalMillasRecorridas)                  AS total_km,
+            AVG(CASE WHEN totalMiles > 0
+                THEN totalRevenue / totalMiles END)     AS avg_rev_per_mile,
+            SUM(totalRenta)                             AS total_renta,
+            COUNT(DISTINCT idTransporte)                AS unidades_activas,
+            COUNT(DISTINCT idChofer1)                   AS choferes_activos
+        FROM (
+            SELECT DISTINCT idViaje, totalRevenue, totalExpenses, totalMiles,
+                   totalMillasRecorridas, totalFuel, totalRenta, idTransporte, idChofer1
+            FROM vwBI_trnViajes
+            WHERE fechaInicio >= %s AND fechaInicio <= %s
+        ) t
     """
-    return run_query(sql, params=(fecha_inicio, fecha_fin))
+    return run_query(sql, (fecha_inicio, fecha_fin))
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def get_viajes_por_semana(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
-    """Trips grouped by ISO week."""
+def get_viajes_por_semana_dedup(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
+    """Trips grouped by ISO week — COUNT DISTINCT per week."""
     sql = """
         SELECT
             DATEPART(YEAR,  fechaInicio)    AS anio,
             DATEPART(WEEK,  fechaInicio)    AS semana,
             CAST(DATEADD(DAY,
                 -(DATEPART(WEEKDAY, fechaInicio) - 2),
-                CAST(fechaInicio AS DATE)) AS DATE)    AS semana_inicio,
-            COUNT(idViaje)                             AS total_viajes,
-            SUM(ISNULL(totalRevenue,  0))              AS total_revenue,
-            SUM(ISNULL(totalExpenses, 0))              AS total_expenses
-        FROM vwBI_trnViajes
-        WHERE fechaInicio >= %s
-          AND fechaInicio <= %s
+                CAST(fechaInicio AS DATE)) AS DATE) AS semana_inicio,
+            COUNT(DISTINCT idViaje)                AS total_viajes,
+            SUM(totalRevenue)                      AS total_revenue,
+            SUM(totalExpenses)                     AS total_expenses
+        FROM (
+            SELECT DISTINCT idViaje, fechaInicio, totalRevenue, totalExpenses
+            FROM vwBI_trnViajes
+            WHERE fechaInicio >= %s AND fechaInicio <= %s
+        ) t
         GROUP BY
             DATEPART(YEAR,  fechaInicio),
             DATEPART(WEEK,  fechaInicio),
@@ -182,127 +173,247 @@ def get_viajes_por_semana(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
                 CAST(fechaInicio AS DATE)) AS DATE)
         ORDER BY anio, semana
     """
-    return run_query(sql, params=(fecha_inicio, fecha_fin))
+    return run_query(sql, (fecha_inicio, fecha_fin))
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def get_viajes_por_tipo(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
-    """Trips grouped by tipoViaje."""
+def get_viajes_por_mes_dedup(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
+    """Trips grouped by month — COUNT DISTINCT per month."""
+    sql = """
+        SELECT
+            YEAR(fechaInicio)   AS anio,
+            MONTH(fechaInicio)  AS mes,
+            COUNT(DISTINCT idViaje) AS total_viajes,
+            SUM(totalRevenue)       AS total_revenue,
+            SUM(totalExpenses)      AS total_expenses
+        FROM (
+            SELECT DISTINCT idViaje, fechaInicio, totalRevenue, totalExpenses
+            FROM vwBI_trnViajes
+            WHERE fechaInicio >= %s AND fechaInicio <= %s
+        ) t
+        GROUP BY YEAR(fechaInicio), MONTH(fechaInicio)
+        ORDER BY anio, mes
+    """
+    return run_query(sql, (fecha_inicio, fecha_fin))
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_viajes_por_tipo_dedup(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
+    """Trips grouped by tipoViaje — COUNT DISTINCT."""
     sql = """
         SELECT
             ISNULL(tipoViaje, 'Sin tipo') AS tipoViaje,
-            COUNT(idViaje)                AS total_viajes,
-            SUM(ISNULL(totalRevenue, 0))  AS total_revenue
-        FROM vwBI_trnViajes
-        WHERE fechaInicio >= %s
-          AND fechaInicio <= %s
+            COUNT(DISTINCT idViaje)       AS total_viajes,
+            SUM(totalRevenue)             AS total_revenue
+        FROM (
+            SELECT DISTINCT idViaje, tipoViaje, totalRevenue
+            FROM vwBI_trnViajes
+            WHERE fechaInicio >= %s AND fechaInicio <= %s
+        ) t
         GROUP BY tipoViaje
         ORDER BY total_viajes DESC
     """
-    return run_query(sql, params=(fecha_inicio, fecha_fin))
+    return run_query(sql, (fecha_inicio, fecha_fin))
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def get_flota_stats(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
-    """Stats grouped by transport unit (idTransporte)."""
+def get_flota_utilizacion(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
+    """Fleet utilization with days active calculation."""
     sql = """
         SELECT
-            ISNULL(CAST(idTransporte AS VARCHAR), 'Sin asignar') AS unidad,
-            COUNT(idViaje)                AS total_viajes,
-            SUM(ISNULL(totalMiles, 0))    AS total_millas,
-            SUM(ISNULL(totalRevenue, 0))  AS total_revenue,
-            SUM(ISNULL(totalExpenses, 0)) AS total_expenses,
-            AVG(ISNULL(revenuePerMile, 0)) AS avg_revenue_per_mile
-        FROM vwBI_trnViajes
-        WHERE fechaInicio >= %s
-          AND fechaInicio <= %s
-        GROUP BY idTransporte
+            v.idTransporte,
+            t.nombre        AS nombreUnidad,
+            t.placasMx,
+            t.marca,
+            t.modelo,
+            COUNT(DISTINCT v.idViaje)                       AS viajes_unicos,
+            SUM(v.totalMiles)                               AS total_miles,
+            SUM(v.totalRevenue)                             AS total_revenue,
+            SUM(v.totalExpenses)                            AS total_expenses,
+            COUNT(DISTINCT CAST(v.fechaInicio AS DATE))     AS dias_con_viaje
+        FROM (
+            SELECT DISTINCT idViaje, idTransporte, fechaInicio,
+                            totalMiles, totalRevenue, totalExpenses
+            FROM vwBI_trnViajes
+            WHERE fechaInicio >= %s AND fechaInicio <= %s
+        ) v
+        LEFT JOIN vwBI_trnTransporte t ON v.idTransporte = t.idTransporte
+        GROUP BY v.idTransporte, t.nombre, t.placasMx, t.marca, t.modelo
         ORDER BY total_revenue DESC
     """
-    return run_query(sql, params=(fecha_inicio, fecha_fin))
+    return run_query(sql, (fecha_inicio, fecha_fin))
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def get_operadores_stats(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
-    """Stats grouped by driver (idChofer1)."""
+def get_operadores_performance(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
+    """Driver performance with real names from catalog."""
     sql = """
         SELECT
-            ISNULL(CAST(idChofer1 AS VARCHAR), 'Sin asignar') AS operador,
-            COUNT(idViaje)                 AS total_viajes,
-            SUM(ISNULL(totalMiles, 0))     AS total_millas,
-            SUM(ISNULL(totalRevenue, 0))   AS total_revenue,
-            SUM(ISNULL(totalExpenses, 0))  AS total_expenses,
-            AVG(ISNULL(revenuePerMile, 0)) AS avg_revenue_per_mile,
-            AVG(ISNULL(costoPerMile, 0))   AS avg_costo_per_mile
-        FROM vwBI_trnViajes
-        WHERE fechaInicio >= %s
-          AND fechaInicio <= %s
-        GROUP BY idChofer1
+            v.idChofer1,
+            c.nombreCompleto    AS nombreChofer,
+            c.licenciaMX,
+            c.licenciaUS,
+            COUNT(DISTINCT v.idViaje)   AS viajes_unicos,
+            SUM(v.totalMiles)           AS total_miles,
+            SUM(v.totalRevenue)         AS total_revenue,
+            SUM(v.honorariosOperador_1) AS total_honorarios,
+            AVG(CASE WHEN v.totalMiles > 0
+                THEN v.totalRevenue / v.totalMiles END) AS rev_por_milla
+        FROM (
+            SELECT DISTINCT idViaje, idChofer1, totalMiles, totalRevenue, honorariosOperador_1
+            FROM vwBI_trnViajes
+            WHERE fechaInicio >= %s AND fechaInicio <= %s
+              AND idChofer1 IS NOT NULL AND idChofer1 > 0
+        ) v
+        LEFT JOIN vwBI_catChoferes c ON v.idChofer1 = c.idChofer
+        GROUP BY v.idChofer1, c.nombreCompleto, c.licenciaMX, c.licenciaUS
         ORDER BY total_revenue DESC
     """
-    return run_query(sql, params=(fecha_inicio, fecha_fin))
+    return run_query(sql, (fecha_inicio, fecha_fin))
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def get_costos_desglose(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
-    """Aggregated cost breakdown for the period."""
+def get_costos_dedup(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
+    """Cost breakdown deduplicated per trip."""
     sql = """
         SELECT
-            SUM(ISNULL(diesel, 0))                              AS diesel_usd,
-            SUM(ISNULL(diselMX, 0))                            AS diesel_mxp,
-            SUM(ISNULL(diselUSD, 0))                           AS diesel_usd2,
-            SUM(ISNULL(CASETASDOLARESUSD, 0))                  AS casetas_usd,
-            SUM(ISNULL(CASETASPESOSMXP, 0))                    AS casetas_mxp,
-            SUM(ISNULL(CASETAVIAPASSPESOSMXP, 0))              AS casetas_viapass_mxp,
-            SUM(ISNULL(honorariosOperador_1, 0))               AS honorarios_op1,
-            SUM(ISNULL(honorariosOperador_2, 0))               AS honorarios_op2,
-            SUM(ISNULL(tolls, 0))                               AS tolls,
-            SUM(ISNULL(scales, 0))                             AS scales,
-            SUM(ISNULL(lumper, 0))                             AS lumper,
-            SUM(ISNULL(misc, 0))                               AS misc,
-            SUM(ISNULL(parts, 0))                              AS parts,
-            SUM(ISNULL(ntsfees, 0))                            AS ntsfees,
-            SUM(ISNULL(tklube, 0))                             AS tklube,
-            SUM(ISNULL(advance, 0))                            AS advance,
-            SUM(ISNULL(viaticosDolares, 0))                    AS viaticos_usd,
-            SUM(ISNULL(viaticosPesos, 0))                      AS viaticos_mxp,
-            SUM(ISNULL(PERMISODEPLACASUSD, 0))                 AS permiso_placas_usd,
-            SUM(ISNULL(GTOSVARIOSUSA, 0))                      AS gtos_varios_usa,
-            SUM(ISNULL(CUOTAUSD, 0))                           AS cuota_usd,
-            SUM(ISNULL(totalExpenses, 0))                      AS total_expenses
-        FROM vwBI_trnViajes
-        WHERE fechaInicio >= %s
-          AND fechaInicio <= %s
+            SUM(diesel)                   AS diesel,
+            SUM(CASETASPESOSMXP)          AS casetasMXP,
+            SUM(CASETASDOLARESUSD)        AS casetasUSD,
+            SUM(honorariosOperador_1)
+              + SUM(honorariosOperador_2) AS honorarios,
+            SUM(viaticosPesos)            AS viaticosMXP,
+            SUM(viaticosDolares)          AS viaticosUSD,
+            SUM(tolls)                    AS tolls,
+            SUM(scales)                   AS scales,
+            SUM(lumper)                   AS lumper,
+            SUM(misc)                     AS misc,
+            SUM(totalRenta)               AS renta,
+            SUM(totalExpenses)            AS total_expenses,
+            SUM(totalRevenue)             AS total_revenue
+        FROM (
+            SELECT DISTINCT idViaje, diesel, CASETASPESOSMXP, CASETASDOLARESUSD,
+                   honorariosOperador_1, honorariosOperador_2, viaticosPesos,
+                   viaticosDolares, tolls, scales, lumper, misc, totalRenta,
+                   totalExpenses, totalRevenue
+            FROM vwBI_trnViajes
+            WHERE fechaInicio >= %s AND fechaInicio <= %s
+        ) t
     """
-    return run_query(sql, params=(fecha_inicio, fecha_fin))
+    return run_query(sql, (fecha_inicio, fecha_fin))
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def get_costos_por_semana(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
-    """Weekly cost per mile trend."""
+def get_costos_por_mes(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
+    """Monthly cost trend deduplicated."""
     sql = """
         SELECT
-            DATEPART(YEAR,  fechaInicio)    AS anio,
-            DATEPART(WEEK,  fechaInicio)    AS semana,
-            CAST(DATEADD(DAY,
-                -(DATEPART(WEEKDAY, fechaInicio) - 2),
-                CAST(fechaInicio AS DATE)) AS DATE)    AS semana_inicio,
-            AVG(ISNULL(costoPerMile, 0))               AS avg_costo_per_mile,
-            AVG(ISNULL(revenuePerMile, 0))             AS avg_revenue_per_mile,
-            SUM(ISNULL(totalExpenses, 0))              AS total_expenses,
-            SUM(ISNULL(totalMiles, 0))                 AS total_millas
-        FROM vwBI_trnViajes
-        WHERE fechaInicio >= %s
-          AND fechaInicio <= %s
-        GROUP BY
-            DATEPART(YEAR,  fechaInicio),
-            DATEPART(WEEK,  fechaInicio),
-            CAST(DATEADD(DAY,
-                -(DATEPART(WEEKDAY, fechaInicio) - 2),
-                CAST(fechaInicio AS DATE)) AS DATE)
-        ORDER BY anio, semana
+            YEAR(fechaInicio)   AS anio,
+            MONTH(fechaInicio)  AS mes,
+            SUM(diesel)         AS diesel,
+            SUM(CASETASPESOSMXP + CASETASDOLARESUSD*17) AS casetasTotal,
+            SUM(honorariosOperador_1 + honorariosOperador_2) AS honorarios,
+            SUM(viaticosPesos)  AS viaticos,
+            SUM(totalRenta)     AS renta,
+            SUM(totalExpenses)  AS total_expenses,
+            SUM(totalRevenue)   AS total_revenue,
+            COUNT(DISTINCT idViaje) AS viajes
+        FROM (
+            SELECT DISTINCT idViaje, fechaInicio, diesel, CASETASPESOSMXP,
+                   CASETASDOLARESUSD, honorariosOperador_1, honorariosOperador_2,
+                   viaticosPesos, totalRenta, totalExpenses, totalRevenue
+            FROM vwBI_trnViajes
+            WHERE fechaInicio >= %s AND fechaInicio <= %s
+        ) t
+        GROUP BY YEAR(fechaInicio), MONTH(fechaInicio)
+        ORDER BY anio, mes
     """
-    return run_query(sql, params=(fecha_inicio, fecha_fin))
+    return run_query(sql, (fecha_inicio, fecha_fin))
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_samsara_trips_raw(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
+    """Raw Samsara trips for GPS block calculation in Python."""
+    sql = """
+        SELECT
+            s.idTrip,
+            s.idTransporte,
+            t.nombre        AS nombreUnidad,
+            t.placasMx,
+            s.driverId,
+            s.vehicleId,
+            s.startMs,
+            s.endMs,
+            s.startLocation,
+            s.endLocation,
+            s.startLatitude,
+            s.startLongitude,
+            s.endLatitude,
+            s.endLongitude,
+            s.startOdometer,
+            s.endOdometer,
+            ISNULL(s.distanceMeters, 0)     AS distanceMeters,
+            ISNULL(s.fuelConsumedMl, 0)     AS fuelConsumedMl,
+            ISNULL(s.tollMeters, 0)         AS tollMeters,
+            s.Fecha_Creo_Registro
+        FROM vwBI_samsaraTrips s
+        LEFT JOIN vwBI_trnTransporte t ON s.idTransporte = t.idTransporte
+        WHERE s.Fecha_Creo_Registro >= %s
+          AND s.Fecha_Creo_Registro <= %s
+          AND ISNULL(s.distanceMeters, 0) > 0
+        ORDER BY s.idTransporte, s.startMs
+    """
+    return run_query(sql, (fecha_inicio, fecha_fin))
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_unidades_catalogo() -> pd.DataFrame:
+    """Full unit catalog from vwBI_trnTransporte."""
+    sql = """
+        SELECT
+            idTransporte,
+            nombre,
+            codigo,
+            marca,
+            modelo,
+            year,
+            placasMx,
+            placasUs,
+            pax,
+            activo,
+            expiraPlacasMx,
+            expiraPlacasUs,
+            expiraSeguroMx,
+            expiraSeguroUs,
+            expiraInspeccionMx,
+            expiraInspeccionUs
+        FROM vwBI_trnTransporte
+        ORDER BY nombre
+    """
+    return run_query(sql)
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_choferes_catalogo() -> pd.DataFrame:
+    """Full driver catalog from vwBI_catChoferes."""
+    sql = """
+        SELECT
+            idChofer,
+            nombreCompleto,
+            codigo,
+            licenciaMX,
+            licenciaUS,
+            situacion,
+            fecExpiraLicenciaMX,
+            fecExpiraLicenciaUS,
+            fecExpiraPasaporte,
+            fecProximoExamenDrogas,
+            PorMillaRecorrida,
+            TarifaFija
+        FROM vwBI_catChoferes
+        ORDER BY nombreCompleto
+    """
+    return run_query(sql)
 
 
 def test_connection() -> bool:

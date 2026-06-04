@@ -1,5 +1,7 @@
 """
-GPS / Samsara — Análisis de viajes GPS y comparación con datos operativos.
+GPS / Samsara — Análisis de bloques GPS con algoritmo de agrupación por continuidad.
+Implementa el algoritmo de bloques GPS (gap < 8h = mismo bloque).
+Clasifica movimientos: Subida, Bajada, Local Base, Traslado.
 """
 
 from __future__ import annotations
@@ -12,10 +14,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
-from db import run_query
+from db import get_samsara_trips_raw
 
 st.set_page_config(
     page_title="GPS Samsara · Transport Analytics",
@@ -23,99 +24,78 @@ st.set_page_config(
     layout="wide",
 )
 
-# ── Query helpers ─────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_samsara_trips(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
-    """Fetch Samsara GPS trips within a date range (filter on startMs)."""
-    sql = """
-        SELECT
-            idTrip,
-            idTransporte,
-            driverId,
-            vehicleId,
-            activo,
-            startMs,
-            endMs,
-            startLatitude,
-            startLongitude,
-            endLatitude,
-            endLongitude,
-            startLocation,
-            endLocation,
-            startOdometer,
-            endOdometer,
-            distanceMeters,
-            tollMeters,
-            fuelConsumedMl,
-            idEmpresa,
-            Fecha_Creo_Registro,
-            Ultimo_Cambio_Fecha
-        FROM vwBI_samsaraTrips
-        WHERE Fecha_Creo_Registro >= %s
-          AND Fecha_Creo_Registro <= %s
-        ORDER BY Fecha_Creo_Registro DESC
-    """
-    return run_query(sql, params=(fecha_inicio, fecha_fin))
+# ── GPS block algorithm ───────────────────────────────────────────────────────
+
+def calcular_bloques_gps(df: pd.DataFrame) -> pd.DataFrame:
+    """Group GPS trips into operational blocks using 8-hour gap rule."""
+    if df.empty:
+        return df
+
+    bloques = []
+    bloque_id = 0
+
+    for unidad, grupo in df.groupby("idTransporte"):
+        grupo = grupo.sort_values("startMs").reset_index(drop=True)
+        bloque_actual = bloque_id
+
+        for i, row in grupo.iterrows():
+            if i == 0:
+                bloque_id += 1
+                bloque_actual = bloque_id
+            else:
+                prev_end   = grupo.loc[i - 1, "endMs"]
+                curr_start = row["startMs"]
+                if pd.notna(prev_end) and pd.notna(curr_start):
+                    gap_hours = (curr_start - prev_end).total_seconds() / 3600
+                    if gap_hours >= 8:
+                        bloque_id += 1
+                        bloque_actual = bloque_id
+            bloques.append(bloque_actual)
+
+    df = df.copy()
+    df["bloqueGPS"] = bloques
+    return df
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_plan_vs_real(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
-    """
-    JOIN vwBI_samsaraTrips with vwBI_trnViajes on idTransporte.
-    Returns planned vs real (GPS) comparison data.
-    """
-    sql = """
-        SELECT
-            t.idViaje,
-            t.idTransporte,
-            t.fechaInicio,
-            t.fechaTermino,
-            ISNULL(t.totalMiles, 0)                             AS totalMiles,
-            s.idTrip,
-            s.driverId,
-            s.startMs,
-            s.endMs,
-            ISNULL(s.distanceMeters, 0)                         AS distanceMeters,
-            ISNULL(s.fuelConsumedMl, 0)                         AS fuelConsumedMl,
-            ISNULL(s.distanceMeters, 0) / 1609.34               AS milesGPS,
-            DATEDIFF(MINUTE, t.fechaInicio, t.fechaTermino)
-                / 60.0                                          AS horasPlaneadas,
-            DATEDIFF(MINUTE, TRY_CONVERT(datetime, s.startMs), TRY_CONVERT(datetime, s.endMs))
-                / 60.0                                          AS horasReales,
-            (ISNULL(s.distanceMeters, 0) / 1609.34)
-                - ISNULL(t.totalMiles, 0)                       AS diferenciaMillas
-        FROM vwBI_trnViajes t
-        INNER JOIN vwBI_samsaraTrips s
-            ON t.idTransporte = s.idTransporte
-        WHERE s.Fecha_Creo_Registro >= %s
-          AND s.Fecha_Creo_Registro <= %s
-          AND t.fechaInicio >= %s
-          AND t.fechaInicio <= %s
-        ORDER BY t.idViaje DESC
-    """
-    return run_query(sql, params=(fecha_inicio, fecha_fin, fecha_inicio, fecha_fin))
+def clasificar_movimiento(start_loc, end_loc) -> str:
+    """Classify GPS movement direction based on location text."""
+    usa_keywords = [
+        "texas", "tx", "laredo", "eagle pass", "del rio",
+        "san antonio", "houston", "usa", "united states", "ee.uu",
+        "nuevo laredo", "columbia", "juárez", "cd juarez",
+    ]
+    mty_keywords = [
+        "monterrey", "mty", "nuevo león", "nl", "guadalupe",
+        "san nicolás", "apodaca", "escobedo", "santa catarina",
+        "san pedro garza",
+    ]
+
+    start = str(start_loc).lower() if start_loc else ""
+    end   = str(end_loc).lower()   if end_loc   else ""
+
+    end_is_usa  = any(k in end   for k in usa_keywords)
+    start_is_usa = any(k in start for k in usa_keywords)
+    start_is_mty = any(k in start for k in mty_keywords)
+    end_is_mty   = any(k in end   for k in mty_keywords)
+
+    if end_is_usa:
+        return "Subida"
+    elif start_is_usa:
+        return "Bajada"
+    elif start_is_mty and end_is_mty:
+        return "Local Base"
+    else:
+        return "Traslado"
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_distancia_por_vehiculo(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
-    """Distance aggregated per vehicle (idTransporte), GPS vs planned."""
-    sql = """
-        SELECT
-            ISNULL(CAST(s.idTransporte AS VARCHAR), 'Sin asignar') AS idTransporte,
-            SUM(ISNULL(s.distanceMeters, 0)) / 1609.34             AS milesGPS,
-            MAX(ISNULL(t.totalMiles, 0))                           AS milesPlaneadas
-        FROM vwBI_samsaraTrips s
-        LEFT JOIN vwBI_trnViajes t
-            ON s.idTransporte = t.idTransporte
-           AND t.fechaInicio >= %s
-           AND t.fechaInicio <= %s
-        WHERE s.Fecha_Creo_Registro >= %s
-          AND s.Fecha_Creo_Registro <= %s
-        GROUP BY s.idTransporte
-        ORDER BY milesGPS DESC
-    """
-    return run_query(sql, params=(fecha_inicio, fecha_fin, fecha_inicio, fecha_fin))
+def nivel_utilizacion(pct: float) -> str:
+    if pct >= 60:
+        return "Alto"
+    elif pct >= 35:
+        return "Medio"
+    else:
+        return "Bajo"
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -138,10 +118,10 @@ with st.sidebar:
     st.markdown("**Filtros de fecha**")
 
     hoy = datetime.date.today()
-    hace_30 = hoy - datetime.timedelta(days=30)
+    primer_dia_mes = hoy.replace(day=1)
 
-    fecha_inicio = st.date_input("Fecha inicio", value=hace_30, key="gps_fi")
-    fecha_fin    = st.date_input("Fecha fin",    value=hoy,     key="gps_ff")
+    fecha_inicio = st.date_input("Fecha inicio", value=primer_dia_mes, key="gps_fi")
+    fecha_fin    = st.date_input("Fecha fin",    value=hoy,            key="gps_ff")
 
     if fecha_inicio > fecha_fin:
         st.error("La fecha de inicio debe ser anterior a la fecha fin.")
@@ -153,288 +133,291 @@ with st.sidebar:
 
 fi_str = fecha_inicio.strftime("%Y-%m-%d")
 ff_str = fecha_fin.strftime("%Y-%m-%d")
+days_in_period = (fecha_fin - fecha_inicio).days + 1
 
 # ── Page header ───────────────────────────────────────────────────────────────
-st.title("📡 GPS / Samsara")
+st.title("📡 GPS / Samsara — Bloques Operativos")
 st.caption(f"Período: {fecha_inicio.strftime('%d/%m/%Y')} — {fecha_fin.strftime('%d/%m/%Y')}")
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 with st.spinner("Cargando datos GPS..."):
-    df_gps = get_samsara_trips(fi_str, ff_str)
+    df_raw = get_samsara_trips_raw(fi_str, ff_str)
 
-if df_gps.empty:
+if df_raw.empty:
     st.warning(
         "No se encontraron viajes GPS para el período seleccionado. "
         "Verifique que la vista vwBI_samsaraTrips contenga datos en este rango de fechas."
     )
     st.stop()
 
-# Ensure datetime types
+# ── Prepare timestamps ────────────────────────────────────────────────────────
 for col in ["startMs", "endMs"]:
-    if col in df_gps.columns:
-        df_gps[col] = pd.to_datetime(df_gps[col], errors="coerce")
+    if col in df_raw.columns:
+        df_raw[col] = pd.to_datetime(df_raw[col], errors="coerce")
+
+df_raw = df_raw.sort_values(["idTransporte", "startMs"]).reset_index(drop=True)
+
+# ── Calculate GPS blocks ──────────────────────────────────────────────────────
+with st.spinner("Calculando bloques GPS..."):
+    df_bloques_raw = calcular_bloques_gps(df_raw)
+
+# ── Classify movement ─────────────────────────────────────────────────────────
+df_bloques_raw["clasificacion"] = df_bloques_raw.apply(
+    lambda r: clasificar_movimiento(r.get("startLocation"), r.get("endLocation")),
+    axis=1,
+)
+
+# ── Aggregate per block ───────────────────────────────────────────────────────
+df_bloques_raw["dist_km"] = df_bloques_raw["distanceMeters"].fillna(0) / 1000.0
+
+df_bloque_agg = (
+    df_bloques_raw.groupby(["bloqueGPS", "idTransporte", "nombreUnidad", "placasMx"])
+    .agg(
+        fecha_inicio_bloque=("startMs", "min"),
+        fecha_fin_bloque=("endMs", "max"),
+        km_totales=("dist_km", "sum"),
+        n_trips=("idTrip", "count"),
+        clasificacion=("clasificacion", lambda x: x.mode()[0] if not x.empty else "Traslado"),
+        chofer_principal=("driverId", lambda x: x.dropna().mode()[0] if not x.dropna().empty else None),
+        start_location_primer=("startLocation", "first"),
+        end_location_ultimo=("endLocation", "last"),
+    )
+    .reset_index()
+)
+
+df_bloque_agg["duracion_horas"] = (
+    (df_bloque_agg["fecha_fin_bloque"] - df_bloque_agg["fecha_inicio_bloque"])
+    .dt.total_seconds()
+    .div(3600)
+    .round(1)
+)
+
+# Flag blocks > 4 days
+df_bloque_agg["flag_revision"] = df_bloque_agg["duracion_horas"] > (4 * 24)
+
+# ── Unit label ────────────────────────────────────────────────────────────────
+df_bloque_agg["etiqueta_unidad"] = df_bloque_agg.apply(
+    lambda r: str(r["nombreUnidad"]) if pd.notna(r.get("nombreUnidad")) and str(r.get("nombreUnidad", "")).strip()
+    else f"Unidad {r['idTransporte']}",
+    axis=1,
+)
+
+# ── Utilization per unit ──────────────────────────────────────────────────────
+df_bloques_raw["fecha_dia"] = df_bloques_raw["startMs"].dt.date
+
+df_util = (
+    df_bloques_raw.groupby(["idTransporte", "nombreUnidad", "placasMx"])
+    .agg(dias_activos=("fecha_dia", "nunique"))
+    .reset_index()
+)
+df_util["pct_utilizacion"] = (df_util["dias_activos"] / days_in_period * 100).round(1)
+df_util["nivel"] = df_util["pct_utilizacion"].apply(nivel_utilizacion)
+df_util["etiqueta_unidad"] = df_util.apply(
+    lambda r: str(r["nombreUnidad"]) if pd.notna(r.get("nombreUnidad")) and str(r.get("nombreUnidad", "")).strip()
+    else f"Unidad {r['idTransporte']}",
+    axis=1,
+)
 
 # ── KPIs ─────────────────────────────────────────────────────────────────────
-st.subheader("Indicadores clave (GPS)")
-
-total_viajes_gps = len(df_gps)
-total_distancia_m = float(df_gps["distanceMeters"].fillna(0).sum())
-total_distancia_km = total_distancia_m / 1000.0
-
-# Avg fuel efficiency: distanceMeters / fuelConsumedMl (m/mL); exclude zeros
-df_fuel = df_gps[
-    (df_gps["fuelConsumedMl"].fillna(0) > 0) &
-    (df_gps["distanceMeters"].fillna(0) > 0)
-].copy()
-
-if not df_fuel.empty:
-    df_fuel["eficiencia"] = df_fuel["distanceMeters"] / df_fuel["fuelConsumedMl"]
-    avg_eficiencia = float(df_fuel["eficiencia"].mean())
-else:
-    avg_eficiencia = 0.0
-
-# Duration stats
-df_gps_dur = df_gps.copy()
-if "startMs" in df_gps_dur.columns and "endMs" in df_gps_dur.columns:
-    df_gps_dur["duracion_h"] = (
-        (df_gps_dur["endMs"] - df_gps_dur["startMs"])
-        .dt.total_seconds()
-        .div(3600)
-        .clip(lower=0)
-    )
-    avg_duracion_h = float(df_gps_dur["duracion_h"].dropna().mean()) if not df_gps_dur["duracion_h"].dropna().empty else 0.0
-else:
-    avg_duracion_h = 0.0
-
-vehiculos_activos = int(df_gps["idTransporte"].nunique())
+total_bloques    = df_bloque_agg["bloqueGPS"].nunique()
+total_km         = float(df_bloque_agg["km_totales"].sum())
+total_unidades   = int(df_util["idTransporte"].nunique())
+avg_utilizacion  = float(df_util["pct_utilizacion"].mean())
+n_flag           = int(df_bloque_agg["flag_revision"].sum())
 
 col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Viajes GPS", f"{total_viajes_gps:,}")
-col2.metric("Distancia total (km)", f"{total_distancia_km:,.1f}")
-col3.metric("Distancia total (millas)", f"{total_distancia_m / 1609.34:,.1f}")
-col4.metric("Eficiencia promedio (m/mL)", f"{avg_eficiencia:.2f}")
-col5.metric("Vehículos activos", f"{vehiculos_activos:,}")
+col1.metric("Total bloques GPS", f"{total_bloques:,}")
+col2.metric("Km totales GPS", f"{total_km:,.1f}")
+col3.metric("Unidades con actividad", f"{total_unidades:,}")
+col4.metric("% Utilización promedio", f"{avg_utilizacion:.1f}%")
+col5.metric("Bloques > 4 días (revisar)", f"{n_flag:,}")
+
+if n_flag > 0:
+    st.warning(
+        f"{n_flag} bloque(s) GPS tienen duración mayor a 4 días. "
+        "Estos registros requieren revisión.",
+        icon="⚠️",
+    )
 
 st.divider()
 
-# ── Plan vs Real table ────────────────────────────────────────────────────────
-st.subheader("Comparativo Plan vs Real GPS")
+# ── Utilization by unit — bar chart ──────────────────────────────────────────
+st.subheader("Utilización por unidad (% días activos en el período)")
 
-with st.spinner("Cargando comparativo planeado vs real..."):
-    df_pvr = get_plan_vs_real(fi_str, ff_str)
+NIVEL_COLOR_MAP = {"Alto": "#2ca02c", "Medio": "#ff7f0e", "Bajo": "#d62728"}
 
-if df_pvr.empty:
-    st.info(
-        "No se encontraron viajes con cruce entre vwBI_trnViajes y vwBI_samsaraTrips "
-        "para el período seleccionado."
+df_util_sorted = df_util.sort_values("pct_utilizacion", ascending=True)
+fig_util = px.bar(
+    df_util_sorted,
+    x="pct_utilizacion",
+    y="etiqueta_unidad",
+    orientation="h",
+    color="nivel",
+    color_discrete_map=NIVEL_COLOR_MAP,
+    text=df_util_sorted["pct_utilizacion"].apply(lambda x: f"{x:.1f}%"),
+    labels={
+        "pct_utilizacion":  "% Utilización",
+        "etiqueta_unidad":  "Unidad",
+        "nivel":            "Nivel",
+    },
+    height=max(400, len(df_util_sorted) * 28),
+)
+fig_util.update_traces(textposition="outside")
+fig_util.update_layout(
+    margin=dict(t=20, b=10, l=10, r=60),
+    yaxis_title="",
+    xaxis_title="% Utilización",
+)
+st.plotly_chart(fig_util, use_container_width=True)
+
+# ── Movement distribution pie ─────────────────────────────────────────────────
+col_left, col_right = st.columns([1, 1])
+
+with col_left:
+    st.subheader("Distribución de movimientos (bloques)")
+    df_mov = (
+        df_bloque_agg.groupby("clasificacion")
+        .agg(total_bloques_mov=("bloqueGPS", "count"), km_mov=("km_totales", "sum"))
+        .reset_index()
     )
+    if not df_mov.empty:
+        fig_mov = px.pie(
+            df_mov,
+            names="clasificacion",
+            values="total_bloques_mov",
+            hole=0.35,
+            color="clasificacion",
+            color_discrete_map={
+                "Subida":     "#1f77b4",
+                "Bajada":     "#ff7f0e",
+                "Local Base": "#2ca02c",
+                "Traslado":   "#9467bd",
+            },
+            height=380,
+        )
+        fig_mov.update_traces(textinfo="label+percent+value")
+        fig_mov.update_layout(
+            showlegend=True,
+            margin=dict(t=20, b=10),
+        )
+        st.plotly_chart(fig_mov, use_container_width=True)
+    else:
+        st.info("Sin datos de movimientos para el período.")
+
+with col_right:
+    st.subheader("Km por tipo de movimiento")
+    if not df_mov.empty:
+        fig_km_mov = px.bar(
+            df_mov.sort_values("km_mov", ascending=True),
+            x="km_mov",
+            y="clasificacion",
+            orientation="h",
+            text=df_mov.sort_values("km_mov", ascending=True)["km_mov"].apply(
+                lambda x: f"{x:,.0f} km"
+            ),
+            color="clasificacion",
+            color_discrete_map={
+                "Subida":     "#1f77b4",
+                "Bajada":     "#ff7f0e",
+                "Local Base": "#2ca02c",
+                "Traslado":   "#9467bd",
+            },
+            labels={"km_mov": "Km totales", "clasificacion": "Tipo"},
+            height=380,
+        )
+        fig_km_mov.update_traces(textposition="outside")
+        fig_km_mov.update_layout(
+            showlegend=False,
+            margin=dict(t=20, b=10, l=10, r=60),
+            yaxis_title="",
+        )
+        st.plotly_chart(fig_km_mov, use_container_width=True)
+
+# ── Utilization heatmap: unit × week ─────────────────────────────────────────
+st.divider()
+st.subheader("Mapa de calor de utilización: Unidad × Semana")
+
+df_bloques_raw["semana_iso"] = df_bloques_raw["startMs"].dt.isocalendar().week.astype(int)
+df_bloques_raw["anio_iso"]   = df_bloques_raw["startMs"].dt.isocalendar().year.astype(int)
+df_bloques_raw["sem_label"]  = df_bloques_raw.apply(
+    lambda r: f"{int(r['anio_iso'])}-S{int(r['semana_iso']):02d}", axis=1
+)
+
+df_heatmap_raw = (
+    df_bloques_raw.groupby(["etiqueta_unidad" if "etiqueta_unidad" in df_bloques_raw.columns else "idTransporte", "sem_label"])
+    .agg(dias_act=("fecha_dia", "nunique"))
+    .reset_index()
+)
+
+# Add etiqueta_unidad to df_bloques_raw if needed
+if "etiqueta_unidad" not in df_bloques_raw.columns:
+    df_bloques_raw["etiqueta_unidad"] = df_bloques_raw.apply(
+        lambda r: str(r["nombreUnidad"]) if pd.notna(r.get("nombreUnidad")) and str(r.get("nombreUnidad", "")).strip()
+        else f"Unidad {r['idTransporte']}",
+        axis=1,
+    )
+    df_heatmap_raw = (
+        df_bloques_raw.groupby(["etiqueta_unidad", "sem_label"])
+        .agg(dias_act=("fecha_dia", "nunique"))
+        .reset_index()
+    )
+
+if not df_heatmap_raw.empty:
+    pivot = df_heatmap_raw.pivot(
+        index="etiqueta_unidad",
+        columns="sem_label",
+        values="dias_act",
+    ).fillna(0)
+
+    fig_heat = px.imshow(
+        pivot,
+        labels={"x": "Semana", "y": "Unidad", "color": "Días activos"},
+        color_continuous_scale=["#f5f5f5", "#2ca02c"],
+        aspect="auto",
+        height=max(300, len(pivot) * 30),
+    )
+    fig_heat.update_layout(
+        margin=dict(t=20, b=10, l=10, r=10),
+        xaxis_tickangle=-30,
+    )
+    st.plotly_chart(fig_heat, use_container_width=True)
+    st.caption("Color verde = más días activos en esa semana")
 else:
-    # Ensure datetime columns
-    for col in ["fechaInicio", "fechaTermino", "startMs", "endMs"]:
-        if col in df_pvr.columns:
-            df_pvr[col] = pd.to_datetime(df_pvr[col], errors="coerce")
+    st.info("Sin datos suficientes para el mapa de calor.")
 
-    df_pvr_display = df_pvr.copy()
-
-    # Format columns for display
-    for dcol in ["fechaInicio", "fechaTermino", "startMs", "endMs"]:
-        if dcol in df_pvr_display.columns:
-            df_pvr_display[dcol] = df_pvr_display[dcol].dt.strftime("%d/%m/%Y %H:%M").fillna("—")
-
-    for ncol in ["totalMiles", "milesGPS"]:
-        if ncol in df_pvr_display.columns:
-            df_pvr_display[ncol] = df_pvr_display[ncol].apply(
-                lambda x: f"{x:,.2f}" if pd.notna(x) else "—"
-            )
-
-    for ncol in ["horasPlaneadas", "horasReales", "diferenciaMillas"]:
-        if ncol in df_pvr_display.columns:
-            df_pvr_display[ncol] = df_pvr_display[ncol].apply(
-                lambda x: f"{x:,.2f}" if pd.notna(x) else "—"
-            )
-
-    rename_pvr = {
-        "idViaje":          "ID Viaje",
-        "idTransporte":     "Unidad",
-        "fechaInicio":      "Inicio Planeado",
-        "fechaTermino":     "Fin Planeado",
-        "totalMiles":       "Millas Planeadas",
-        "idTrip":           "ID Trip GPS",
-        "driverId":         "ID Conductor",
-        "startMs":          "Inicio GPS",
-        "endMs":            "Fin GPS",
-        "milesGPS":         "Millas GPS",
-        "horasPlaneadas":   "Horas Planeadas",
-        "horasReales":      "Horas Reales (GPS)",
-        "diferenciaMillas": "Dif. Millas (GPS - Plan)",
-    }
-
-    display_cols_pvr = [c for c in rename_pvr.keys() if c in df_pvr_display.columns]
-    df_pvr_display = df_pvr_display[display_cols_pvr].rename(
-        columns={k: v for k, v in rename_pvr.items() if k in display_cols_pvr}
-    )
-
-    st.dataframe(df_pvr_display, use_container_width=True, hide_index=True)
-    st.caption(
-        f"Mostrando {len(df_pvr):,} registros · "
-        "Fuente: vwBI_trnViajes INNER JOIN vwBI_samsaraTrips (idTransporte)"
-    )
-
+# ── GPS blocks table ──────────────────────────────────────────────────────────
 st.divider()
+st.subheader(f"Tabla de bloques GPS ({total_bloques:,} bloques)")
 
-# ── Map: start locations colored by driverId ──────────────────────────────────
-st.subheader("Mapa de puntos de inicio de viajes GPS")
+df_table = df_bloque_agg[[
+    "etiqueta_unidad", "bloqueGPS", "clasificacion",
+    "fecha_inicio_bloque", "fecha_fin_bloque", "duracion_horas",
+    "km_totales", "n_trips", "chofer_principal", "flag_revision",
+]].copy()
 
-df_map = df_gps[
-    df_gps["startLatitude"].notna() &
-    df_gps["startLongitude"].notna() &
-    (df_gps["startLatitude"] != 0) &
-    (df_gps["startLongitude"] != 0)
-].copy()
+for dcol in ["fecha_inicio_bloque", "fecha_fin_bloque"]:
+    df_table[dcol] = pd.to_datetime(df_table[dcol], errors="coerce").dt.strftime("%d/%m/%Y %H:%M")
 
-if df_map.empty:
-    st.info("No hay coordenadas de inicio disponibles para mostrar en el mapa.")
-else:
-    df_map["driverIdStr"] = df_map["driverId"].fillna(0).astype(int).astype(str)
-    df_map["distancia_km"] = (df_map["distanceMeters"].fillna(0) / 1000).round(2)
-    df_map["startMs_str"] = df_map["startMs"].dt.strftime("%d/%m/%Y %H:%M").fillna("—")
+df_table["km_totales"]    = df_table["km_totales"].apply(lambda x: f"{x:,.1f}")
+df_table["duracion_horas"] = df_table["duracion_horas"].apply(lambda x: f"{x:,.1f} h")
+df_table["flag_revision"] = df_table["flag_revision"].apply(lambda x: "⚠️ Revisar" if x else "")
 
-    fig_map = px.scatter_mapbox(
-        df_map,
-        lat="startLatitude",
-        lon="startLongitude",
-        color="driverIdStr",
-        hover_name="idTrip",
-        hover_data={
-            "startLocation": True,
-            "distancia_km": True,
-            "startMs_str": True,
-            "startLatitude": False,
-            "startLongitude": False,
-            "driverIdStr": False,
-        },
-        labels={
-            "driverIdStr": "Conductor (ID)",
-            "startLocation": "Ubicación inicio",
-            "distancia_km": "Distancia (km)",
-            "startMs_str": "Fecha inicio",
-        },
-        mapbox_style="open-street-map",
-        zoom=4,
-        height=500,
-    )
-    fig_map.update_layout(
-        margin=dict(t=10, b=10, l=0, r=0),
-        legend_title_text="Conductor (ID)",
-    )
-    st.plotly_chart(fig_map, use_container_width=True)
-    st.caption(
-        f"Mostrando {len(df_map):,} puntos de inicio · "
-        "Coordenadas: startLatitude / startLongitude · Color por conductor (driverId)"
-    )
+df_table = df_table.rename(columns={
+    "etiqueta_unidad":    "Unidad",
+    "bloqueGPS":          "Bloque GPS",
+    "clasificacion":      "Clasificación",
+    "fecha_inicio_bloque":"Inicio bloque",
+    "fecha_fin_bloque":   "Fin bloque",
+    "duracion_horas":     "Duración",
+    "km_totales":         "Km totales",
+    "n_trips":            "Trips GPS",
+    "chofer_principal":   "Chofer (driverId)",
+    "flag_revision":      "Alerta",
+})
 
-st.divider()
-
-# ── Bar chart: distance per vehicle GPS vs planned ────────────────────────────
-st.subheader("Distancia por unidad: GPS vs Planeado (millas)")
-
-with st.spinner("Cargando distancia por vehículo..."):
-    df_dist = get_distancia_por_vehiculo(fi_str, ff_str)
-
-if df_dist.empty:
-    st.info("No hay datos de distancia por vehículo para el período seleccionado.")
-else:
-    # Limit to top 30 vehicles by GPS miles for readability
-    df_dist = df_dist.sort_values("milesGPS", ascending=False).head(30).copy()
-
-    df_melted = df_dist.melt(
-        id_vars="idTransporte",
-        value_vars=["milesGPS", "milesPlaneadas"],
-        var_name="Tipo",
-        value_name="Millas",
-    )
-    df_melted["Tipo"] = df_melted["Tipo"].map(
-        {"milesGPS": "Millas GPS", "milesPlaneadas": "Millas Planeadas"}
-    )
-
-    fig_bar = px.bar(
-        df_melted,
-        x="idTransporte",
-        y="Millas",
-        color="Tipo",
-        barmode="group",
-        labels={
-            "idTransporte": "Unidad (idTransporte)",
-            "Millas": "Millas recorridas",
-            "Tipo": "Fuente",
-        },
-        color_discrete_map={
-            "Millas GPS":       "#1f77b4",
-            "Millas Planeadas": "#ff7f0e",
-        },
-        height=450,
-    )
-    fig_bar.update_layout(
-        xaxis_tickangle=-45,
-        margin=dict(t=20, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis_title="Unidad (idTransporte)",
-        yaxis_title="Millas",
-    )
-    st.plotly_chart(fig_bar, use_container_width=True)
-    st.caption(
-        "Top 30 unidades por millas GPS · "
-        "Millas GPS = distanceMeters / 1609.34 · "
-        "Millas Planeadas = totalMiles de vwBI_trnViajes"
-    )
-
-st.divider()
-
-# ── Raw GPS trips table ───────────────────────────────────────────────────────
-with st.expander("Ver detalle de viajes GPS", expanded=False):
-    df_raw = df_gps.copy()
-
-    for dcol in ["startMs", "endMs", "Fecha_Creo_Registro", "Ultimo_Cambio_Fecha"]:
-        if dcol in df_raw.columns:
-            df_raw[dcol] = pd.to_datetime(df_raw[dcol], errors="coerce") \
-                              .dt.strftime("%d/%m/%Y %H:%M").fillna("—")
-
-    df_raw["distancia_km"] = (df_gps["distanceMeters"].fillna(0) / 1000).round(3)
-    df_raw["millas_gps"]   = (df_gps["distanceMeters"].fillna(0) / 1609.34).round(3)
-
-    display_raw_cols = [c for c in [
-        "idTrip", "idTransporte", "driverId", "vehicleId", "activo",
-        "startMs", "endMs", "startLocation", "endLocation",
-        "distancia_km", "millas_gps",
-        "fuelConsumedMl", "tollMeters",
-        "startLatitude", "startLongitude", "endLatitude", "endLongitude",
-    ] if c in df_raw.columns]
-
-    rename_raw = {
-        "idTrip":          "ID Trip",
-        "idTransporte":    "Unidad",
-        "driverId":        "Conductor ID",
-        "vehicleId":       "Vehículo ID",
-        "activo":          "Activo",
-        "startMs":         "Inicio GPS",
-        "endMs":           "Fin GPS",
-        "startLocation":   "Ubicación inicio",
-        "endLocation":     "Ubicación fin",
-        "distancia_km":    "Distancia (km)",
-        "millas_gps":      "Millas GPS",
-        "fuelConsumedMl":  "Combustible (mL)",
-        "tollMeters":      "Casetas (m)",
-        "startLatitude":   "Lat. inicio",
-        "startLongitude":  "Lon. inicio",
-        "endLatitude":     "Lat. fin",
-        "endLongitude":    "Lon. fin",
-    }
-
-    df_raw_display = df_raw[display_raw_cols].rename(
-        columns={k: v for k, v in rename_raw.items() if k in display_raw_cols}
-    )
-    st.dataframe(df_raw_display, use_container_width=True, hide_index=True)
-    st.caption(
-        f"Total: {len(df_raw):,} viajes GPS · Fuente: vwBI_samsaraTrips · "
-        f"Período: {fecha_inicio.strftime('%d/%m/%Y')} — {fecha_fin.strftime('%d/%m/%Y')}"
-    )
+st.dataframe(df_table, use_container_width=True, hide_index=True)
+st.caption(
+    f"Bloques calculados con regla de gap >= 8 horas entre trips consecutivos por unidad · "
+    f"Período: {fecha_inicio.strftime('%d/%m/%Y')} — {fecha_fin.strftime('%d/%m/%Y')} · "
+    "Fuente: vwBI_samsaraTrips"
+)

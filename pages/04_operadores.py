@@ -1,5 +1,7 @@
 """
 Operadores — Driver performance page.
+Uses get_operadores_performance() with real driver names from catalog.
+All charts show nombreChofer on axes, not numeric IDs.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from db import get_operadores_stats
+from db import get_operadores_performance
 
 st.set_page_config(
     page_title="Operadores · Transport Analytics",
@@ -42,10 +44,10 @@ with st.sidebar:
     st.markdown("**Filtros**")
 
     hoy = datetime.date.today()
-    hace_30 = hoy - datetime.timedelta(days=30)
+    primer_dia_mes = hoy.replace(day=1)
 
-    fecha_inicio = st.date_input("Fecha inicio", value=hace_30, key="op_fi")
-    fecha_fin    = st.date_input("Fecha fin",    value=hoy,     key="op_ff")
+    fecha_inicio = st.date_input("Fecha inicio", value=primer_dia_mes, key="op_fi")
+    fecha_fin    = st.date_input("Fecha fin",    value=hoy,            key="op_ff")
 
     if fecha_inicio > fecha_fin:
         st.error("La fecha de inicio debe ser anterior a la fecha fin.")
@@ -55,12 +57,13 @@ with st.sidebar:
 
     metrica_orden = st.selectbox(
         "Ordenar por",
-        options=["Ingresos totales", "Viajes totales", "Millas totales", "Rev/Milla promedio"],
+        options=["Ingresos totales", "Viajes únicos", "Millas totales", "Rev/Milla promedio"],
         index=0,
     )
 
-    if st.button("🔄 Actualizar datos", key="op_refresh"):
+    if st.button("Actualizar datos", key="op_refresh"):
         st.cache_data.clear()
+        st.rerun()
 
 # ── Page header ───────────────────────────────────────────────────────────────
 st.title("👤 Desempeño de Operadores")
@@ -71,37 +74,45 @@ ff_str = fecha_fin.strftime("%Y-%m-%d")
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 with st.spinner("Cargando estadísticas de operadores..."):
-    df = get_operadores_stats(fi_str, ff_str)
+    df = get_operadores_performance(fi_str, ff_str)
 
 if df.empty:
     st.warning("No se encontraron datos de operadores para el período seleccionado.")
     st.stop()
 
+# Fill missing names
+df["nombreChofer"] = df["nombreChofer"].fillna("Sin nombre").replace("", "Sin nombre")
+df["etiqueta"] = df.apply(
+    lambda r: r["nombreChofer"] if r["nombreChofer"] not in ("Sin nombre", "")
+    else f"Chofer ID {r['idChofer1']}",
+    axis=1,
+)
+
 # ── Sort by selected metric ───────────────────────────────────────────────────
 sort_col_map = {
-    "Ingresos totales": "total_revenue",
-    "Viajes totales": "total_viajes",
-    "Millas totales": "total_millas",
-    "Rev/Milla promedio": "avg_revenue_per_mile",
+    "Ingresos totales":    "total_revenue",
+    "Viajes únicos":       "viajes_unicos",
+    "Millas totales":      "total_miles",
+    "Rev/Milla promedio":  "rev_por_milla",
 }
 sort_col = sort_col_map[metrica_orden]
-df = df.sort_values(sort_col, ascending=False)
+df = df.sort_values(sort_col, ascending=False, na_position="last")
 df_top = df.head(top_n).copy()
 
 # ── Summary metrics ───────────────────────────────────────────────────────────
 total_operadores = len(df)
-total_viajes     = int(df["total_viajes"].sum())
-total_millas     = float(df["total_millas"].sum())
-total_revenue    = float(df["total_revenue"].sum())
-total_expenses   = float(df["total_expenses"].sum())
-mejor_op_label   = df.iloc[0]["operador"] if not df.empty else "N/A"
+total_viajes     = int(df["viajes_unicos"].sum())
+total_miles      = float(df["total_miles"].fillna(0).sum())
+total_revenue    = float(df["total_revenue"].fillna(0).sum())
+total_honorarios = float(df["total_honorarios"].fillna(0).sum())
+mejor_op         = df.iloc[0]["etiqueta"] if not df.empty else "N/A"
 
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Operadores activos", f"{total_operadores:,}")
-col2.metric("Total viajes", f"{total_viajes:,}")
-col3.metric("Total millas", f"{total_millas:,.0f}")
+col2.metric("Total viajes únicos", f"{total_viajes:,}")
+col3.metric("Total millas", f"{total_miles:,.0f}")
 col4.metric("Ingresos totales (USD)", f"${total_revenue:,.2f}")
-col5.metric("Mejor operador (ingresos)", f"Op. {mejor_op_label}")
+col5.metric("Mejor por ingresos", mejor_op[:25] + ("..." if len(mejor_op) > 25 else ""))
 
 st.divider()
 
@@ -109,18 +120,18 @@ st.divider()
 col_left, col_right = st.columns(2)
 
 with col_left:
-    st.subheader(f"Viajes por operador (Top {top_n})")
-    df_plot = df_top.sort_values("total_viajes", ascending=True)
+    st.subheader(f"Viajes únicos por operador (Top {top_n})")
+    df_plot = df_top.sort_values("viajes_unicos", ascending=True)
     fig_viajes = px.bar(
         df_plot,
-        x="total_viajes",
-        y="operador",
+        x="viajes_unicos",
+        y="etiqueta",
         orientation="h",
-        text="total_viajes",
-        labels={"total_viajes": "Viajes", "operador": "Operador (ID)"},
-        color="total_viajes",
+        text="viajes_unicos",
+        labels={"viajes_unicos": "Viajes únicos", "etiqueta": "Operador"},
+        color="viajes_unicos",
         color_continuous_scale="Blues",
-        height=max(400, top_n * 22),
+        height=max(400, top_n * 24),
     )
     fig_viajes.update_traces(textposition="outside")
     fig_viajes.update_layout(
@@ -136,145 +147,127 @@ with col_right:
     fig_rev = px.bar(
         df_plot2,
         x="total_revenue",
-        y="operador",
+        y="etiqueta",
         orientation="h",
-        text=df_plot2["total_revenue"].apply(lambda x: f"${x:,.0f}"),
-        labels={"total_revenue": "Ingresos (USD)", "operador": "Operador (ID)"},
+        text=df_plot2["total_revenue"].apply(lambda x: f"${x:,.0f}" if pd.notna(x) else "—"),
+        labels={"total_revenue": "Ingresos (USD)", "etiqueta": "Operador"},
         color="total_revenue",
         color_continuous_scale="Greens",
-        height=max(400, top_n * 22),
+        height=max(400, top_n * 24),
     )
     fig_rev.update_traces(textposition="outside")
     fig_rev.update_layout(
         coloraxis_showscale=False,
-        margin=dict(t=20, b=10, l=10, r=10),
+        margin=dict(t=20, b=10, l=10, r=60),
         yaxis_title="",
     )
     st.plotly_chart(fig_rev, use_container_width=True)
 
-# ── Miles per operator ────────────────────────────────────────────────────────
 col_left2, col_right2 = st.columns(2)
 
 with col_left2:
-    st.subheader(f"Millas recorridas por operador (Top {top_n})")
-    df_plot3 = df_top.sort_values("total_millas", ascending=True)
+    st.subheader(f"Millas por operador (Top {top_n})")
+    df_plot3 = df_top.sort_values("total_miles", ascending=True)
     fig_millas = px.bar(
         df_plot3,
-        x="total_millas",
-        y="operador",
+        x="total_miles",
+        y="etiqueta",
         orientation="h",
-        text=df_plot3["total_millas"].apply(lambda x: f"{x:,.0f}"),
-        labels={"total_millas": "Millas", "operador": "Operador (ID)"},
-        color="total_millas",
+        text=df_plot3["total_miles"].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "—"),
+        labels={"total_miles": "Millas", "etiqueta": "Operador"},
+        color="total_miles",
         color_continuous_scale="Oranges",
-        height=max(400, top_n * 22),
+        height=max(400, top_n * 24),
     )
     fig_millas.update_traces(textposition="outside")
     fig_millas.update_layout(
         coloraxis_showscale=False,
-        margin=dict(t=20, b=10, l=10, r=10),
+        margin=dict(t=20, b=10, l=10, r=60),
         yaxis_title="",
     )
     st.plotly_chart(fig_millas, use_container_width=True)
 
 with col_right2:
     st.subheader(f"Revenue por milla promedio — Top {top_n}")
-    df_plot4 = df_top.sort_values("avg_revenue_per_mile", ascending=True)
+    df_plot4 = df_top.sort_values("rev_por_milla", ascending=True)
     fig_rpm = px.bar(
         df_plot4,
-        x="avg_revenue_per_mile",
-        y="operador",
+        x="rev_por_milla",
+        y="etiqueta",
         orientation="h",
-        text=df_plot4["avg_revenue_per_mile"].apply(lambda x: f"${x:,.3f}"),
-        labels={
-            "avg_revenue_per_mile": "Rev/Milla (USD)",
-            "operador": "Operador (ID)",
-        },
-        color="avg_revenue_per_mile",
+        text=df_plot4["rev_por_milla"].apply(lambda x: f"${x:,.3f}" if pd.notna(x) else "—"),
+        labels={"rev_por_milla": "Rev/Milla (USD)", "etiqueta": "Operador"},
+        color="rev_por_milla",
         color_continuous_scale="RdYlGn",
-        height=max(400, top_n * 22),
+        height=max(400, top_n * 24),
     )
     fig_rpm.update_traces(textposition="outside")
     fig_rpm.update_layout(
         coloraxis_showscale=False,
-        margin=dict(t=20, b=10, l=10, r=10),
+        margin=dict(t=20, b=10, l=10, r=60),
         yaxis_title="",
     )
     st.plotly_chart(fig_rpm, use_container_width=True)
 
-# ── Efficiency scatter ────────────────────────────────────────────────────────
-st.subheader("Eficiencia operativa: Ingresos vs Millas por operador")
-df_scatter = df_top.copy()
-df_scatter["margen"] = df_scatter["total_revenue"] - df_scatter["total_expenses"]
-df_scatter["margen_pct"] = (
-    df_scatter["margen"] / df_scatter["total_revenue"].replace(0, float("nan")) * 100
-)
-
-fig_scatter = px.scatter(
-    df_scatter,
-    x="total_millas",
-    y="total_revenue",
-    size="total_viajes",
-    color="avg_revenue_per_mile",
-    hover_name="operador",
-    hover_data={
-        "total_viajes": True,
-        "total_millas": ":.0f",
-        "total_revenue": ":$.2f",
-        "total_expenses": ":$.2f",
-        "margen": ":$.2f",
-        "avg_revenue_per_mile": ":$.3f",
-        "avg_costo_per_mile": ":$.3f",
-    },
-    labels={
-        "total_millas": "Millas totales",
-        "total_revenue": "Ingresos totales (USD)",
-        "avg_revenue_per_mile": "Rev/Milla",
-        "total_viajes": "Viajes",
-    },
-    color_continuous_scale="RdYlGn",
-    height=480,
-)
-fig_scatter.update_layout(margin=dict(t=20, b=10))
-st.plotly_chart(fig_scatter, use_container_width=True)
+# ── Honorarios chart ──────────────────────────────────────────────────────────
+st.subheader(f"Honorarios pagados por operador (Top {top_n})")
+df_hon = df_top[df_top["total_honorarios"].fillna(0) > 0].sort_values("total_honorarios", ascending=True)
+if not df_hon.empty:
+    fig_hon = px.bar(
+        df_hon,
+        x="total_honorarios",
+        y="etiqueta",
+        orientation="h",
+        text=df_hon["total_honorarios"].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else "—"),
+        labels={"total_honorarios": "Honorarios (USD)", "etiqueta": "Operador"},
+        color="total_honorarios",
+        color_continuous_scale="Purples",
+        height=max(300, len(df_hon) * 28),
+    )
+    fig_hon.update_traces(textposition="outside")
+    fig_hon.update_layout(
+        coloraxis_showscale=False,
+        margin=dict(t=20, b=10, l=10, r=60),
+        yaxis_title="",
+    )
+    st.plotly_chart(fig_hon, use_container_width=True)
+else:
+    st.info("Sin datos de honorarios para el período seleccionado.")
 
 # ── Data table ────────────────────────────────────────────────────────────────
 st.divider()
 st.subheader("Tabla de desempeño por operador")
 
-df_table = df.copy()
-df_table["margen"] = df_table["total_revenue"] - df_table["total_expenses"]
+df_table = df[["etiqueta", "licenciaMX", "licenciaUS", "viajes_unicos", "total_miles",
+               "total_revenue", "total_honorarios", "rev_por_milla"]].copy()
 
-format_usd = lambda x: f"${x:,.2f}"
-format_num = lambda x: f"{x:,.0f}"
-format_rpm = lambda x: f"${x:,.3f}"
-
-for col_name, fmt in [
-    ("total_revenue", format_usd),
-    ("total_expenses", format_usd),
-    ("margen", format_usd),
-    ("total_millas", format_num),
-    ("avg_revenue_per_mile", format_rpm),
-    ("avg_costo_per_mile", format_rpm),
-]:
-    if col_name in df_table.columns:
-        df_table[col_name] = df_table[col_name].apply(fmt)
-
-df_table = df_table.rename(
-    columns={
-        "operador": "Operador (ID)",
-        "total_viajes": "Viajes",
-        "total_millas": "Millas",
-        "total_revenue": "Ingresos (USD)",
-        "total_expenses": "Gastos (USD)",
-        "margen": "Margen (USD)",
-        "avg_revenue_per_mile": "Rev/Milla (USD)",
-        "avg_costo_per_mile": "Costo/Milla (USD)",
-    }
+df_table["total_revenue"] = df_table["total_revenue"].apply(
+    lambda x: f"${x:,.2f}" if pd.notna(x) else "—"
 )
+df_table["total_honorarios"] = df_table["total_honorarios"].apply(
+    lambda x: f"${x:,.2f}" if pd.notna(x) else "—"
+)
+df_table["total_miles"] = df_table["total_miles"].apply(
+    lambda x: f"{x:,.0f}" if pd.notna(x) else "—"
+)
+df_table["rev_por_milla"] = df_table["rev_por_milla"].apply(
+    lambda x: f"${x:,.3f}" if pd.notna(x) else "—"
+)
+
+df_table = df_table.rename(columns={
+    "etiqueta":          "Operador",
+    "licenciaMX":        "Licencia MX",
+    "licenciaUS":        "Licencia US",
+    "viajes_unicos":     "Viajes únicos",
+    "total_miles":       "Millas",
+    "total_revenue":     "Ingresos (USD)",
+    "total_honorarios":  "Honorarios (USD)",
+    "rev_por_milla":     "Rev/Milla (USD)",
+})
 
 st.dataframe(df_table, use_container_width=True, hide_index=True)
 st.caption(
-    f"Total: {total_operadores} operadores · Período: {fecha_inicio.strftime('%d/%m/%Y')} — "
-    f"{fecha_fin.strftime('%d/%m/%Y')} · Fuente: vwBI_trnViajes (idChofer1)"
+    f"Total: {total_operadores} operadores · "
+    f"Período: {fecha_inicio.strftime('%d/%m/%Y')} — {fecha_fin.strftime('%d/%m/%Y')} · "
+    "Fuente: vwBI_trnViajes + vwBI_catChoferes"
 )
