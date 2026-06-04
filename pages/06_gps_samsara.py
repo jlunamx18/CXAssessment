@@ -16,7 +16,8 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from db import get_samsara_trips_raw
+from db import get_samsara_trips_raw, get_unidades_catalogo
+from gps_html import build_df_raw_from_excel, get_all_gps_months, best_gps_source
 
 st.set_page_config(
     page_title="GPS Samsara · Transport Analytics",
@@ -118,10 +119,20 @@ with st.sidebar:
     st.markdown("**Filtros de fecha**")
 
     hoy = datetime.date.today()
-    primer_dia_mes = hoy.replace(day=1)
 
-    fecha_inicio = st.date_input("Fecha inicio", value=primer_dia_mes, key="gps_fi")
-    fecha_fin    = st.date_input("Fecha fin",    value=hoy,            key="gps_ff")
+    # Default to last month with GPS data (DB or Excel)
+    _gps_months = get_all_gps_months()
+    if _gps_months:
+        _def_y, _def_m = max(_gps_months)
+        import calendar as _cal
+        _primer = datetime.date(_def_y, _def_m, 1)
+        _ultimo = datetime.date(_def_y, _def_m, _cal.monthrange(_def_y, _def_m)[1])
+    else:
+        _primer = hoy.replace(day=1)
+        _ultimo = hoy
+
+    fecha_inicio = st.date_input("Fecha inicio", value=_primer, key="gps_fi")
+    fecha_fin    = st.date_input("Fecha fin",    value=_ultimo, key="gps_ff")
 
     if fecha_inicio > fecha_fin:
         st.error("La fecha de inicio debe ser anterior a la fecha fin.")
@@ -141,21 +152,59 @@ st.caption(f"Período: {fecha_inicio.strftime('%d/%m/%Y')} — {fecha_fin.strfti
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 with st.spinner("Cargando datos GPS..."):
-    df_raw = get_samsara_trips_raw(fi_str, ff_str)
+    df_raw     = get_samsara_trips_raw(fi_str, ff_str)
+    df_catalog = get_unidades_catalogo()
+
+gps_source = "db"
+
+# Build catalog maps for Excel fallback
+code_to_id: dict = {}
+id_to_info: dict = {}
+if not df_catalog.empty:
+    for _, crow in df_catalog.iterrows():
+        uid    = crow["idTransporte"]
+        codigo = str(crow.get("codigo", "")).strip()
+        if codigo:
+            code_to_id[codigo] = uid
+        id_to_info[uid] = {
+            "nombre":   str(crow.get("nombre", "") or ""),
+            "placasMx": str(crow.get("placasMx", "") or ""),
+        }
+
+if df_raw.empty:
+    src = best_gps_source(fecha_inicio.year, fecha_inicio.month)
+    if src == "excel":
+        df_raw = build_df_raw_from_excel(fi_str, ff_str, code_to_id, id_to_info)
+        gps_source = "excel"
+    elif src == "html":
+        st.warning(
+            f"No hay detalle GPS por día para este período en la BD. "
+            "Solo hay resumen mensual (HTML). Selecciona un mes con datos Excel (Ene–May 2026) "
+            "o un mes anterior (BD hasta Nov 2025).",
+            icon="⚠️",
+        )
+        st.stop()
 
 if df_raw.empty:
     st.warning(
         "No se encontraron viajes GPS para el período seleccionado. "
-        "Verifique que la vista vwBI_samsaraTrips contenga datos en este rango de fechas."
+        "Prueba con Enero–Mayo 2026 (datos Excel) o hasta Noviembre 2025 (BD)."
     )
     st.stop()
 
+if gps_source == "excel":
+    st.info(
+        f"Fuente GPS: **archivos Excel Samsara** ({fecha_inicio.strftime('%b %Y')}). "
+        f"{len(df_raw):,} viajes cargados.",
+        icon="📊",
+    )
+
 # ── Prepare timestamps ────────────────────────────────────────────────────────
-# startMs/endMs are Unix milliseconds stored as nvarchar — convert via numeric
-for col in ["startMs", "endMs"]:
-    if col in df_raw.columns:
-        numeric = pd.to_numeric(df_raw[col], errors="coerce")
-        df_raw[col] = pd.to_datetime(numeric, unit="ms", errors="coerce")
+if gps_source == "db":
+    for col in ["startMs", "endMs"]:
+        if col in df_raw.columns:
+            numeric = pd.to_numeric(df_raw[col], errors="coerce")
+            df_raw[col] = pd.to_datetime(numeric, unit="ms", errors="coerce")
 
 df_raw = df_raw.sort_values(["idTransporte", "startMs"]).reset_index(drop=True)
 

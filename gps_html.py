@@ -94,7 +94,65 @@ def get_excel_gps_days(year: int, month: int, code_to_id: dict) -> dict:
     return gps_dias
 
 
-# ── HTML (monthly-summary) data ───────────────────────────────────────────────
+def build_df_raw_from_excel(
+    fecha_inicio: str,
+    fecha_fin: str,
+    code_to_id: dict,
+    id_to_info: dict,
+) -> "pd.DataFrame":
+    """Build a df_raw DataFrame (same schema as get_samsara_trips_raw) from Excel data.
+
+    code_to_id : bus_code → idTransporte
+    id_to_info : idTransporte → {'nombre': ..., 'placasMx': ...}
+    """
+    import pandas as pd
+    from datetime import date as _date
+
+    df = _load_excel()
+    if df.empty:
+        return pd.DataFrame()
+
+    fi = pd.to_datetime(fecha_inicio).date()
+    ff = pd.to_datetime(fecha_fin).date()
+    mask = (df["fecha"] >= fi) & (df["fecha"] <= ff)
+    df = df[mask].copy().reset_index(drop=True)
+    if df.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for i, row in df.iterrows():
+        bus_code = str(row["bus_code"]).strip()
+        uid = code_to_id.get(bus_code)
+        if uid is None:
+            continue
+        info = id_to_info.get(uid, {})
+        rows.append({
+            "idTrip":          i,
+            "idTransporte":    uid,
+            "nombreUnidad":    info.get("nombre", bus_code),
+            "placasMx":        info.get("placasMx", ""),
+            "driverId":        row.get("driver", ""),
+            "vehicleId":       bus_code,
+            "startMs":         pd.to_datetime(row.get("start_time"), errors="coerce"),
+            "endMs":           pd.to_datetime(row.get("end_time"),   errors="coerce"),
+            "startLocation":   row.get("start_addr", ""),
+            "endLocation":     row.get("end_addr",   ""),
+            "startLatitude":   None,
+            "startLongitude":  None,
+            "endLatitude":     None,
+            "endLongitude":    None,
+            "startOdometer":   None,
+            "endOdometer":     None,
+            "distanceMeters":  float(row["km"]) * 1000,
+            "fuelConsumedMl":  0,
+            "tollMeters":      0,
+            "Fecha_Creo_Registro": row.get("fecha"),
+            "_source":         "excel",
+        })
+
+    return pd.DataFrame(rows)
+
+
 
 @lru_cache(maxsize=1)
 def _load_html() -> dict:
