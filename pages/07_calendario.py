@@ -93,10 +93,12 @@ with st.spinner("Cargando datos..."):
     df_catalog = get_unidades_catalogo()
 
 # ── Build GPS active days ─────────────────────────────────────────────────────
+# Use Fecha_Creo_Registro for date (startMs is Unix-ms nvarchar → parses as 1970 in pandas)
 gps_dias: dict[tuple, float] = {}   # (idTransporte, date) → km
 if not df_gps_raw.empty:
-    df_gps_raw["startMs"] = pd.to_datetime(df_gps_raw["startMs"], errors="coerce")
-    df_gps_raw["fecha_dia"] = df_gps_raw["startMs"].dt.date
+    df_gps_raw["fecha_dia"] = pd.to_datetime(
+        df_gps_raw["Fecha_Creo_Registro"], errors="coerce"
+    ).dt.date
     for _, row in df_gps_raw.iterrows():
         if pd.notna(row["fecha_dia"]):
             key = (row["idTransporte"], row["fecha_dia"])

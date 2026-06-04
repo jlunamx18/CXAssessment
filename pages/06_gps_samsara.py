@@ -151,9 +151,11 @@ if df_raw.empty:
     st.stop()
 
 # ── Prepare timestamps ────────────────────────────────────────────────────────
+# startMs/endMs are Unix milliseconds stored as nvarchar — convert via numeric
 for col in ["startMs", "endMs"]:
     if col in df_raw.columns:
-        df_raw[col] = pd.to_datetime(df_raw[col], errors="coerce")
+        numeric = pd.to_numeric(df_raw[col], errors="coerce")
+        df_raw[col] = pd.to_datetime(numeric, unit="ms", errors="coerce")
 
 df_raw = df_raw.sort_values(["idTransporte", "startMs"]).reset_index(drop=True)
 
