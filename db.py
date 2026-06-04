@@ -333,7 +333,12 @@ def get_costos_por_mes(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_samsara_trips_raw(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
-    """Raw Samsara trips for GPS block calculation in Python."""
+    """Raw Samsara trips for GPS block calculation in Python.
+
+    startMs is stored as nvarchar Unix-ms timestamp.
+    Filter uses DATEADD(SECOND, TRY_CAST(startMs)/1000, epoch) to get real trip dates.
+    Fecha_Creo_Registro is the DB sync date — NOT the trip date — so we avoid it here.
+    """
     sql = """
         SELECT
             s.idTrip,
@@ -358,8 +363,9 @@ def get_samsara_trips_raw(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
             s.Fecha_Creo_Registro
         FROM vwBI_samsaraTrips s
         LEFT JOIN vwBI_trnTransporte t ON s.idTransporte = t.idTransporte
-        WHERE s.Fecha_Creo_Registro >= %s
-          AND s.Fecha_Creo_Registro <= %s
+        WHERE TRY_CAST(s.startMs AS BIGINT) IS NOT NULL
+          AND DATEADD(SECOND, TRY_CAST(s.startMs AS BIGINT) / 1000, '19700101') >= %s
+          AND DATEADD(SECOND, TRY_CAST(s.startMs AS BIGINT) / 1000, '19700101') <= DATEADD(DAY, 1, CAST(%s AS DATE))
           AND ISNULL(s.distanceMeters, 0) > 0
         ORDER BY s.idTransporte, s.startMs
     """
