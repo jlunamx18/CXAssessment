@@ -363,13 +363,37 @@ def get_samsara_trips_raw(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
             s.Fecha_Creo_Registro
         FROM vwBI_samsaraTrips s
         LEFT JOIN vwBI_trnTransporte t ON s.idTransporte = t.idTransporte
-        WHERE TRY_CAST(s.startMs AS BIGINT) IS NOT NULL
-          AND DATEADD(SECOND, TRY_CAST(s.startMs AS BIGINT) / 1000, '19700101') >= %s
-          AND DATEADD(SECOND, TRY_CAST(s.startMs AS BIGINT) / 1000, '19700101') <= DATEADD(DAY, 1, CAST(%s AS DATE))
+        WHERE TRY_CAST(s.startMs AS FLOAT) IS NOT NULL
+          AND DATEADD(SECOND, CAST(TRY_CAST(s.startMs AS FLOAT) / 1000.0 AS INT), '19700101') >= %s
+          AND DATEADD(SECOND, CAST(TRY_CAST(s.startMs AS FLOAT) / 1000.0 AS INT), '19700101') < DATEADD(DAY, 1, CAST(%s AS DATE))
           AND ISNULL(s.distanceMeters, 0) > 0
         ORDER BY s.idTransporte, s.startMs
     """
     return run_query(sql, (fecha_inicio, fecha_fin))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_gps_diagnostico() -> pd.DataFrame:
+    """Return 10 raw GPS rows without date filter to inspect startMs format."""
+    sql = """
+        SELECT TOP 10
+            s.idTransporte,
+            s.startMs,
+            s.endMs,
+            s.Fecha_Creo_Registro,
+            ISNULL(s.distanceMeters, 0) AS distanceMeters,
+            TRY_CAST(s.startMs AS FLOAT)  AS startMs_float,
+            TRY_CAST(s.startMs AS BIGINT) AS startMs_bigint,
+            CASE WHEN TRY_CAST(s.startMs AS FLOAT) IS NOT NULL
+                 THEN DATEADD(SECOND,
+                        CAST(TRY_CAST(s.startMs AS FLOAT) / 1000.0 AS INT),
+                        '19700101')
+                 ELSE NULL END AS startMs_converted
+        FROM vwBI_samsaraTrips s
+        WHERE ISNULL(s.distanceMeters, 0) > 0
+        ORDER BY s.Fecha_Creo_Registro DESC
+    """
+    return run_query(sql, ())
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)

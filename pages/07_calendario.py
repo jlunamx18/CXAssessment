@@ -18,7 +18,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
 
-from db import get_samsara_trips_raw, get_tms_dias_por_unidad, get_unidades_catalogo
+from db import get_samsara_trips_raw, get_tms_dias_por_unidad, get_unidades_catalogo, get_gps_diagnostico
 
 st.set_page_config(
     page_title="Calendario · Transport Analytics",
@@ -91,6 +91,19 @@ with st.spinner("Cargando datos..."):
     df_gps_raw = get_samsara_trips_raw(fi_str, ff_str)
     df_tms_raw = get_tms_dias_por_unidad(fi_str, ff_str)
     df_catalog = get_unidades_catalogo()
+
+# ── GPS diagnostics (always visible) ─────────────────────────────────────────
+with st.expander("🔍 Diagnóstico GPS — ver formato de startMs", expanded=df_gps_raw.empty):
+    df_diag = get_gps_diagnostico()
+    if df_diag.empty:
+        st.error("No se encontraron registros en vwBI_samsaraTrips (sin filtro de fecha).")
+    else:
+        st.caption("Muestra de 10 registros GPS recientes (sin filtro de fecha) para verificar formato de startMs:")
+        st.dataframe(df_diag, use_container_width=True, hide_index=True)
+        st.caption(
+            f"Registros GPS en el período seleccionado: **{len(df_gps_raw)}** · "
+            f"Registros TMS: **{len(df_tms_raw)}**"
+        )
 
 # ── Build GPS active days ─────────────────────────────────────────────────────
 # startMs is Unix epoch milliseconds stored as nvarchar — convert via numeric
