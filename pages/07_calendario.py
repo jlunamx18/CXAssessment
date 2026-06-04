@@ -1,7 +1,6 @@
 """
-Calendario — Monthly utilization calendar per unit.
-Shows a heatmap calendar (weeks × days) with GPS activity per unit.
-Green = active day (has GPS activity), gray = inactive.
+Calendario de Utilización — matriz flota × días del mes.
+Muestra GPS y TMS combinados: huecos visibles de un vistazo.
 """
 
 from __future__ import annotations
@@ -19,13 +18,19 @@ import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
 
-from db import get_samsara_trips_raw, get_unidades_catalogo
+from db import get_samsara_trips_raw, get_tms_dias_por_unidad, get_unidades_catalogo
 
 st.set_page_config(
     page_title="Calendario · Transport Analytics",
     page_icon="📅",
     layout="wide",
 )
+
+MESES_ES = {
+    1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
+    5: "Mayo",  6: "Junio",   7: "Julio", 8: "Agosto",
+    9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
+}
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -44,305 +49,305 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.divider()
-    st.markdown("**Filtros**")
+    st.markdown("**Período**")
 
     hoy = datetime.date.today()
-
     anio_sel = st.selectbox(
-        "Año",
-        options=list(range(hoy.year - 2, hoy.year + 1)),
-        index=2,
-        key="cal_anio",
+        "Año", options=list(range(hoy.year - 2, hoy.year + 1)),
+        index=2, key="cal_anio",
     )
     mes_sel = st.selectbox(
-        "Mes",
-        options=list(range(1, 13)),
+        "Mes", options=list(range(1, 13)),
         index=hoy.month - 1,
-        format_func=lambda m: {
-            1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
-            5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
-            9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
-        }[m],
+        format_func=lambda m: MESES_ES[m],
         key="cal_mes",
     )
+    st.divider()
+    st.markdown("**Fuente de datos**")
+    fuente = st.radio(
+        "Mostrar actividad de:",
+        options=["GPS (Samsara)", "TMS (Sistema)", "Ambos"],
+        index=2, key="cal_fuente",
+    )
 
-    if st.button("Actualizar datos", key="cal_refresh"):
+    if st.button("🔄 Actualizar datos", key="cal_refresh"):
         st.cache_data.clear()
         st.rerun()
 
-# ── Compute date range for selected month ─────────────────────────────────────
+# ── Date range ────────────────────────────────────────────────────────────────
 primer_dia = datetime.date(anio_sel, mes_sel, 1)
-ultimo_dia = datetime.date(
-    anio_sel, mes_sel, calendar.monthrange(anio_sel, mes_sel)[1]
-)
+ultimo_dia = datetime.date(anio_sel, mes_sel, calendar.monthrange(anio_sel, mes_sel)[1])
 fi_str = primer_dia.strftime("%Y-%m-%d")
 ff_str = ultimo_dia.strftime("%Y-%m-%d")
 days_in_month = (ultimo_dia - primer_dia).days + 1
-
-MESES_ES = {
-    1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
-    5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
-    9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
-}
+dias_del_mes  = [primer_dia + datetime.timedelta(days=i) for i in range(days_in_month)]
 
 # ── Page header ───────────────────────────────────────────────────────────────
 st.title("📅 Calendario de Utilización")
-st.caption(f"Período: {MESES_ES[mes_sel]} {anio_sel}")
+st.caption(f"{MESES_ES[mes_sel]} {anio_sel} · {days_in_month} días")
 
 # ── Load data ─────────────────────────────────────────────────────────────────
-with st.spinner("Cargando datos GPS..."):
-    df_raw     = get_samsara_trips_raw(fi_str, ff_str)
+with st.spinner("Cargando datos..."):
+    df_gps_raw = get_samsara_trips_raw(fi_str, ff_str)
+    df_tms_raw = get_tms_dias_por_unidad(fi_str, ff_str)
     df_catalog = get_unidades_catalogo()
 
-if df_raw.empty:
-    st.warning(
-        "No se encontraron datos GPS para el período seleccionado. "
-        "Verifique que vwBI_samsaraTrips tenga datos en este mes."
-    )
-    st.stop()
+# ── Build GPS active days ─────────────────────────────────────────────────────
+gps_dias: dict[tuple, float] = {}   # (idTransporte, date) → km
+if not df_gps_raw.empty:
+    df_gps_raw["startMs"] = pd.to_datetime(df_gps_raw["startMs"], errors="coerce")
+    df_gps_raw["fecha_dia"] = df_gps_raw["startMs"].dt.date
+    for _, row in df_gps_raw.iterrows():
+        if pd.notna(row["fecha_dia"]):
+            key = (row["idTransporte"], row["fecha_dia"])
+            gps_dias[key] = gps_dias.get(key, 0) + float(row.get("distanceMeters") or 0) / 1000
 
-# Ensure datetime
-df_raw["startMs"] = pd.to_datetime(df_raw["startMs"], errors="coerce")
-df_raw["endMs"]   = pd.to_datetime(df_raw["endMs"],   errors="coerce")
-df_raw["fecha_dia"] = df_raw["startMs"].dt.date
+# ── Build TMS active days ─────────────────────────────────────────────────────
+tms_dias: dict[tuple, int] = {}    # (idTransporte, date) → viajes
+if not df_tms_raw.empty:
+    df_tms_raw["dia"] = pd.to_datetime(df_tms_raw["dia"], errors="coerce").dt.date
+    for _, row in df_tms_raw.iterrows():
+        if pd.notna(row["dia"]):
+            key = (row["idTransporte"], row["dia"])
+            tms_dias[key] = tms_dias.get(key, 0) + int(row.get("viajes_dia") or 0)
 
-# ── Build unit options ────────────────────────────────────────────────────────
-unidades_con_datos = df_raw["idTransporte"].dropna().unique().tolist()
+# ── Collect all units to display ──────────────────────────────────────────────
+ids_gps = set(k[0] for k in gps_dias)
+ids_tms = set(k[0] for k in tms_dias)
 
-if not df_catalog.empty:
-    df_catalog_filt = df_catalog[df_catalog["idTransporte"].isin(unidades_con_datos)].copy()
-    df_catalog_filt["etiqueta"] = df_catalog_filt.apply(
-        lambda r: str(r["nombre"]) if pd.notna(r.get("nombre")) and str(r.get("nombre", "")).strip()
-        else f"Unidad {r['idTransporte']}",
-        axis=1,
-    )
-    opciones = df_catalog_filt.set_index("etiqueta")["idTransporte"].to_dict()
+if fuente == "GPS (Samsara)":
+    ids_show = ids_gps
+elif fuente == "TMS (Sistema)":
+    ids_show = ids_tms
 else:
-    opciones = {f"Unidad {uid}": uid for uid in sorted(unidades_con_datos)}
+    ids_show = ids_gps | ids_tms
 
-if not opciones:
-    st.warning("No se encontraron unidades con datos GPS en el período seleccionado.")
+# Build label map from catalog
+label_map: dict = {}
+if not df_catalog.empty:
+    for _, row in df_catalog.iterrows():
+        uid = row["idTransporte"]
+        nombre = str(row.get("nombre", "")).strip()
+        codigo = str(row.get("codigo", "")).strip()
+        label_map[uid] = f"{codigo} — {nombre}" if nombre else f"Unidad {uid}"
+
+def unit_label(uid) -> str:
+    return label_map.get(uid, f"Unidad {uid}")
+
+# Sort units by label
+sorted_units = sorted(ids_show, key=lambda u: unit_label(u))
+
+if not sorted_units:
+    st.warning("No se encontraron datos para el período seleccionado.")
     st.stop()
 
-# ── Unit selector in sidebar ──────────────────────────────────────────────────
-with st.sidebar:
-    unidad_sel_label = st.selectbox(
-        "Seleccionar unidad",
-        options=list(opciones.keys()),
-        key="cal_unidad",
-    )
+# ── Legend ────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div style="display:flex;gap:20px;align-items:center;margin-bottom:8px;font-size:13px;">
+  <span><span style="background:#2ca02c;padding:2px 10px;border-radius:3px;color:white">GPS + TMS</span></span>
+  <span><span style="background:#1f77b4;padding:2px 10px;border-radius:3px;color:white">Solo TMS</span></span>
+  <span><span style="background:#17becf;padding:2px 10px;border-radius:3px;color:white">Solo GPS</span></span>
+  <span><span style="background:#e0e0e0;padding:2px 10px;border-radius:3px;color:#666">Inactivo (hueco)</span></span>
+</div>
+""", unsafe_allow_html=True)
 
-unidad_sel_id = opciones[unidad_sel_label]
+# ── Build matrix ──────────────────────────────────────────────────────────────
+# Values: 0=inactivo, 1=solo TMS, 2=solo GPS, 3=ambos
+n_units = len(sorted_units)
+n_days  = days_in_month
 
-# ── Filter GPS data for selected unit ────────────────────────────────────────
-df_unit = df_raw[df_raw["idTransporte"] == unidad_sel_id].copy()
+matrix     = np.zeros((n_units, n_days), dtype=float)
+text_matrix = [["" for _ in range(n_days)] for _ in range(n_units)]
 
-# Collect active days
-active_days = set(df_unit["fecha_dia"].dropna().unique())
+for i, uid in enumerate(sorted_units):
+    for j, dia in enumerate(dias_del_mes):
+        has_gps = (uid, dia) in gps_dias
+        has_tms = (uid, dia) in tms_dias
+        if has_gps and has_tms:
+            matrix[i, j] = 3.0
+        elif has_tms:
+            matrix[i, j] = 1.0
+        elif has_gps:
+            matrix[i, j] = 2.0
+        else:
+            matrix[i, j] = 0.0
 
-# ── Build calendar grid ───────────────────────────────────────────────────────
-# Weeks as rows, weekdays (Mon=0 ... Sun=6) as columns
-DIAS_SEMANA = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+        # Tooltip text
+        parts = []
+        if has_tms:
+            parts.append(f"TMS: {tms_dias.get((uid, dia), 0)} viajes")
+        if has_gps:
+            parts.append(f"GPS: {gps_dias.get((uid, dia), 0):.0f} km")
+        text_matrix[i][j] = f"Día {dia.day}<br>" + "<br>".join(parts) if parts else f"Día {dia.day}<br>Sin actividad"
 
-# Get all days of the month
-all_days = [
-    primer_dia + datetime.timedelta(days=i) for i in range(days_in_month)
+# Color scale: 0=gray, 1=blue(TMS), 2=teal(GPS), 3=green(ambos)
+colorscale = [
+    [0.00, "#e0e0e0"], [0.24, "#e0e0e0"],
+    [0.25, "#1f77b4"], [0.49, "#1f77b4"],
+    [0.50, "#17becf"], [0.74, "#17becf"],
+    [0.75, "#2ca02c"], [1.00, "#2ca02c"],
 ]
 
-# Build a 6x7 grid (max 6 weeks)
-# Find the weekday of the first day (Mon=0)
-first_weekday = primer_dia.weekday()
+y_labels  = [unit_label(uid) for uid in sorted_units]
+x_labels  = [str(d.day) for d in dias_del_mes]
 
-grid_values  = np.full((6, 7), np.nan)
-grid_text    = [["" for _ in range(7)] for _ in range(6)]
+# Mark weekends
+x_ticks_color = []
+for d in dias_del_mes:
+    if d.weekday() >= 5:  # Sat/Sun
+        x_ticks_color.append("#c0392b")
+    else:
+        x_ticks_color.append("#333333")
 
-for i, day in enumerate(all_days):
-    col = (first_weekday + i) % 7
-    row = (first_weekday + i) // 7
-    if row < 6:
-        grid_values[row][col] = 1.0 if day in active_days else 0.0
-        grid_text[row][col]   = str(day.day)
+fig = go.Figure(data=go.Heatmap(
+    z=matrix,
+    x=x_labels,
+    y=y_labels,
+    text=text_matrix,
+    hovertemplate="%{y}<br>%{text}<extra></extra>",
+    colorscale=colorscale,
+    showscale=False,
+    zmin=0, zmax=3,
+    xgap=2, ygap=2,
+))
 
-# Remove all-NaN rows
-max_row = 0
-for i, day in enumerate(all_days):
-    row = (first_weekday + i) // 7
-    max_row = max(max_row, row)
-grid_values = grid_values[:max_row + 1]
-grid_text   = grid_text[:max_row + 1]
-
-# ── Plotly heatmap calendar ───────────────────────────────────────────────────
-st.subheader(f"Calendario de actividad GPS — {unidad_sel_label}")
-st.caption("Verde = día con actividad GPS  |  Gris = día sin actividad  |  Blanco = fuera del mes")
-
-fig_cal = go.Figure(
-    data=go.Heatmap(
-        z=grid_values,
-        text=grid_text,
-        texttemplate="%{text}",
-        textfont={"size": 14},
-        colorscale=[
-            [0.0, "#e0e0e0"],
-            [0.5, "#e0e0e0"],
-            [0.5, "#2ca02c"],
-            [1.0, "#2ca02c"],
-        ],
-        showscale=False,
-        zmin=0,
-        zmax=1,
-        xgap=3,
-        ygap=3,
-    )
-)
-
-fig_cal.update_layout(
+fig.update_layout(
+    height=max(300, n_units * 42 + 80),
+    margin=dict(t=30, b=40, l=220, r=20),
+    plot_bgcolor="white",
+    paper_bgcolor="white",
     xaxis=dict(
-        tickvals=list(range(7)),
-        ticktext=DIAS_SEMANA,
+        tickvals=list(range(n_days)),
+        ticktext=x_labels,
+        tickfont=dict(size=11),
         side="top",
-        tickfont=dict(size=13, color="#333"),
+        title="Día del mes",
+        titlefont=dict(size=11),
     ),
     yaxis=dict(
-        tickvals=list(range(len(grid_values))),
-        ticktext=[f"Sem {i+1}" for i in range(len(grid_values))],
+        tickfont=dict(size=11),
         autorange="reversed",
-        tickfont=dict(size=12, color="#555"),
     ),
-    margin=dict(t=60, b=20, l=60, r=20),
-    height=250 + len(grid_values) * 55,
-    plot_bgcolor="white",
 )
-st.plotly_chart(fig_cal, use_container_width=True)
 
-# ── Summary KPIs for selected unit ───────────────────────────────────────────
-st.divider()
-st.subheader(f"Resumen de {unidad_sel_label} — {MESES_ES[mes_sel]} {anio_sel}")
+st.plotly_chart(fig, use_container_width=True)
 
-dias_activos   = len(active_days)
-pct_util       = round(dias_activos / days_in_month * 100, 1)
-total_km       = float(df_unit["distanceMeters"].fillna(0).sum()) / 1000.0
-total_trips    = len(df_unit)
-avg_km_por_dia = total_km / dias_activos if dias_activos else 0
+# ── Summary KPI table ─────────────────────────────────────────────────────────
+st.subheader("Resumen por unidad")
 
 def nivel_util(pct: float) -> str:
-    if pct >= 60:
-        return "Alto"
-    elif pct >= 35:
-        return "Medio"
+    if pct >= 60: return "🟢 Alto"
+    if pct >= 35: return "🟡 Medio"
+    return "🔴 Bajo"
+
+rows_summary = []
+for uid in sorted_units:
+    dias_gps = sum(1 for d in dias_del_mes if (uid, d) in gps_dias)
+    dias_tms = sum(1 for d in dias_del_mes if (uid, d) in tms_dias)
+    dias_match = sum(1 for d in dias_del_mes if (uid, d) in gps_dias and (uid, d) in tms_dias)
+    dias_tms_only = sum(1 for d in dias_del_mes if (uid, d) in tms_dias and (uid, d) not in gps_dias)
+    dias_gps_only = sum(1 for d in dias_del_mes if (uid, d) in gps_dias and (uid, d) not in tms_dias)
+    km_gps = sum(gps_dias.get((uid, d), 0) for d in dias_del_mes)
+    viajes_tms = sum(tms_dias.get((uid, d), 0) for d in dias_del_mes)
+
+    dias_activos = max(dias_gps, dias_tms)
+    pct = round(dias_activos / days_in_month * 100, 1)
+
+    rows_summary.append({
+        "Unidad": unit_label(uid),
+        "Días GPS": dias_gps,
+        "Días TMS": dias_tms,
+        "✅ Ambos": dias_match,
+        "🔵 Solo TMS": dias_tms_only,
+        "🔷 Solo GPS": dias_gps_only,
+        "Huecos": days_in_month - dias_activos,
+        "% Utilización": f"{pct:.1f}%",
+        "Nivel": nivel_util(pct),
+        "Km GPS": f"{km_gps:,.0f}",
+        "Viajes TMS": viajes_tms,
+    })
+
+df_summary = pd.DataFrame(rows_summary)
+st.dataframe(df_summary, use_container_width=True, hide_index=True)
+
+# ── Per-unit detail expandable ────────────────────────────────────────────────
+st.divider()
+st.subheader("Detalle por unidad")
+
+unidad_detail = st.selectbox(
+    "Seleccionar unidad para ver detalle diario:",
+    options=[unit_label(u) for u in sorted_units],
+    key="cal_detail_sel",
+)
+
+uid_sel = sorted_units[[unit_label(u) for u in sorted_units].index(unidad_detail)]
+
+# Build daily detail for selected unit
+detail_rows = []
+for dia in dias_del_mes:
+    has_gps = (uid_sel, dia) in gps_dias
+    has_tms = (uid_sel, dia) in tms_dias
+    km = gps_dias.get((uid_sel, dia), 0)
+    viajes = tms_dias.get((uid_sel, dia), 0)
+
+    if has_gps and has_tms:
+        estado = "✅ GPS + TMS"
+    elif has_tms:
+        estado = "🔵 Solo TMS"
+    elif has_gps:
+        estado = "🔷 Solo GPS"
     else:
-        return "Bajo"
+        estado = "⬜ Inactivo"
 
-nivel = nivel_util(pct_util)
-NIVEL_EMOJI = {"Alto": "🟢", "Medio": "🟡", "Bajo": "🔴"}
+    detail_rows.append({
+        "Día": dia.strftime("%d/%m/%Y"),
+        "Semana": f"Sem {(dia.day - 1) // 7 + 1}",
+        "DiaSemana": ["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"][dia.weekday()],
+        "Estado": estado,
+        "Km GPS": round(km, 1) if has_gps else 0,
+        "Viajes TMS": viajes if has_tms else 0,
+    })
 
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Días activos GPS", f"{dias_activos} / {days_in_month}")
-col2.metric("% Utilización", f"{pct_util:.1f}%")
-col3.metric("Nivel", f"{NIVEL_EMOJI.get(nivel, '')} {nivel}")
-col4.metric("Km totales GPS", f"{total_km:,.1f}")
-col5.metric("Km promedio por día activo", f"{avg_km_por_dia:,.1f}")
+df_detail = pd.DataFrame(detail_rows)
 
-# ── Daily km bar chart ────────────────────────────────────────────────────────
-if not df_unit.empty:
-    st.subheader("Kilómetros por día")
-    df_daily = (
-        df_unit.groupby("fecha_dia")
-        .agg(km=("distanceMeters", lambda x: x.fillna(0).sum() / 1000.0))
-        .reset_index()
+# KPIs for selected unit
+dias_gps_u   = sum(1 for d in dias_del_mes if (uid_sel, d) in gps_dias)
+dias_tms_u   = sum(1 for d in dias_del_mes if (uid_sel, d) in tms_dias)
+huecos_u     = days_in_month - max(dias_gps_u, dias_tms_u)
+km_total_u   = sum(gps_dias.get((uid_sel, d), 0) for d in dias_del_mes)
+pct_u        = round(max(dias_gps_u, dias_tms_u) / days_in_month * 100, 1)
+
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("Días activos GPS", dias_gps_u)
+c2.metric("Días activos TMS", dias_tms_u)
+c3.metric("Huecos (inactivos)", huecos_u)
+c4.metric("Km GPS totales", f"{km_total_u:,.0f}")
+c5.metric("% Utilización", f"{pct_u:.1f}%")
+
+# Daily km bar chart
+if km_total_u > 0:
+    df_km = df_detail[df_detail["Km GPS"] > 0].copy()
+    df_km["Día_dt"] = pd.to_datetime(df_km["Día"], format="%d/%m/%Y")
+    fig_km = px.bar(
+        df_km, x="Día_dt", y="Km GPS",
+        color_discrete_sequence=["#17becf"],
+        labels={"Día_dt": "Fecha", "Km GPS": "Km GPS"},
+        height=250,
     )
-    df_daily["fecha_dia"] = pd.to_datetime(df_daily["fecha_dia"])
-    df_daily = df_daily.sort_values("fecha_dia")
-
-    fig_daily = px.bar(
-        df_daily,
-        x="fecha_dia",
-        y="km",
-        labels={"fecha_dia": "Fecha", "km": "Km GPS"},
-        color_discrete_sequence=["#2ca02c"],
-        text=df_daily["km"].apply(lambda x: f"{x:,.0f}"),
-        height=300,
-    )
-    fig_daily.update_traces(textposition="outside")
-    fig_daily.update_layout(
-        margin=dict(t=20, b=10),
+    fig_km.update_layout(
+        margin=dict(t=10, b=10),
         xaxis_tickformat="%d/%m",
     )
-    st.plotly_chart(fig_daily, use_container_width=True)
+    st.plotly_chart(fig_km, use_container_width=True)
 
-# ── All units utilization summary ────────────────────────────────────────────
-st.divider()
-st.subheader(f"Resumen de utilización — todas las unidades — {MESES_ES[mes_sel]} {anio_sel}")
-
-df_util_all = (
-    df_raw.groupby("idTransporte")
-    .agg(
-        dias_activos=("fecha_dia", "nunique"),
-        km_totales=("distanceMeters", lambda x: x.fillna(0).sum() / 1000.0),
-        trips=("idTrip", "count"),
-    )
-    .reset_index()
+# Detail table — highlight inactive days
+st.dataframe(
+    df_detail[["Día", "DiaSemana", "Estado", "Km GPS", "Viajes TMS"]],
+    use_container_width=True,
+    hide_index=True,
 )
 
-# Join names
-if not df_catalog.empty:
-    df_util_all = df_util_all.merge(
-        df_catalog[["idTransporte", "nombre", "placasMx"]],
-        on="idTransporte",
-        how="left",
-    )
-    df_util_all["etiqueta"] = df_util_all.apply(
-        lambda r: str(r["nombre"]) if pd.notna(r.get("nombre")) and str(r.get("nombre", "")).strip()
-        else f"Unidad {r['idTransporte']}",
-        axis=1,
-    )
-else:
-    df_util_all["etiqueta"]  = df_util_all["idTransporte"].apply(lambda x: f"Unidad {x}")
-    df_util_all["placasMx"]  = ""
-
-df_util_all["pct_utilizacion"] = (df_util_all["dias_activos"] / days_in_month * 100).round(1)
-df_util_all["nivel"] = df_util_all["pct_utilizacion"].apply(nivel_util)
-df_util_all = df_util_all.sort_values("pct_utilizacion", ascending=False)
-
-# Bar chart utilization all units
-fig_all_util = px.bar(
-    df_util_all.sort_values("pct_utilizacion", ascending=True),
-    x="pct_utilizacion",
-    y="etiqueta",
-    orientation="h",
-    color="nivel",
-    color_discrete_map={"Alto": "#2ca02c", "Medio": "#ff7f0e", "Bajo": "#d62728"},
-    text=df_util_all.sort_values("pct_utilizacion", ascending=True)["pct_utilizacion"].apply(
-        lambda x: f"{x:.1f}%"
-    ),
-    labels={"pct_utilizacion": "% Utilización", "etiqueta": "Unidad", "nivel": "Nivel"},
-    height=max(400, len(df_util_all) * 28),
-)
-fig_all_util.update_traces(textposition="outside")
-fig_all_util.update_layout(
-    margin=dict(t=20, b=10, l=10, r=60),
-    yaxis_title="",
-)
-st.plotly_chart(fig_all_util, use_container_width=True)
-
-# Table all units
-df_table_all = df_util_all[["etiqueta", "placasMx", "dias_activos", "pct_utilizacion", "nivel", "km_totales", "trips"]].copy()
-NIVEL_COLOR = {"Alto": "🟢", "Medio": "🟡", "Bajo": "🔴"}
-df_table_all["nivel"] = df_table_all["nivel"].apply(lambda n: f"{NIVEL_COLOR.get(n, '')} {n}")
-df_table_all["pct_utilizacion"] = df_table_all["pct_utilizacion"].apply(lambda x: f"{x:.1f}%")
-df_table_all["km_totales"] = df_table_all["km_totales"].apply(lambda x: f"{x:,.1f}")
-
-df_table_all = df_table_all.rename(columns={
-    "etiqueta":         "Unidad",
-    "placasMx":         "Placas MX",
-    "dias_activos":     "Días activos",
-    "pct_utilizacion":  "% Utilización",
-    "nivel":            "Nivel",
-    "km_totales":       "Km totales GPS",
-    "trips":            "Trips GPS",
-})
-st.dataframe(df_table_all, use_container_width=True, hide_index=True)
 st.caption(
-    f"{MESES_ES[mes_sel]} {anio_sel} · {days_in_month} días en el período · "
-    "Nivel: >= 60% Alto (verde), 35-59% Medio (amarillo), < 35% Bajo (rojo) · "
-    "Fuente: vwBI_samsaraTrips"
+    f"Fuente: vwBI_samsaraTrips (GPS) + vwBI_trnViajes (TMS) · "
+    f"Nivel utilización: ≥60% Alto · 35-59% Medio · <35% Bajo"
 )
