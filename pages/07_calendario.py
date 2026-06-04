@@ -18,7 +18,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
 
-from db import get_samsara_trips_raw, get_tms_dias_por_unidad, get_unidades_catalogo, get_gps_diagnostico
+from db import get_samsara_trips_raw, get_tms_dias_por_unidad, get_unidades_catalogo, get_gps_diagnostico, get_gps_ultimo_mes
 
 st.set_page_config(
     page_title="Calendario · Transport Analytics",
@@ -52,16 +52,26 @@ with st.sidebar:
     st.markdown("**Período**")
 
     hoy = datetime.date.today()
+
+    # Default to last month with GPS data (avoids showing empty GPS for current month)
+    _ultimo = get_gps_ultimo_mes()
+    _def_anio = _ultimo[0] if _ultimo else hoy.year
+    _def_mes  = _ultimo[1] if _ultimo else hoy.month
+
+    _anios = list(range(min(hoy.year - 3, _def_anio), hoy.year + 1))
     anio_sel = st.selectbox(
-        "Año", options=list(range(hoy.year - 2, hoy.year + 1)),
-        index=2, key="cal_anio",
+        "Año", options=_anios,
+        index=_anios.index(_def_anio) if _def_anio in _anios else len(_anios) - 1,
+        key="cal_anio",
     )
     mes_sel = st.selectbox(
         "Mes", options=list(range(1, 13)),
-        index=hoy.month - 1,
+        index=_def_mes - 1,
         format_func=lambda m: MESES_ES[m],
         key="cal_mes",
     )
+    if _ultimo:
+        st.caption(f"Último GPS en BD: {MESES_ES[_ultimo[1]]} {_ultimo[0]}")
     st.divider()
     st.markdown("**Fuente de datos**")
     fuente = st.radio(

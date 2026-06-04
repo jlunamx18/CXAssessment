@@ -372,6 +372,28 @@ def get_samsara_trips_raw(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
     return run_query(sql, (fecha_inicio, fecha_fin))
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def get_gps_ultimo_mes() -> tuple[int, int] | None:
+    """Return (year, month) of the most recent GPS trip in the DB."""
+    sql = """
+        SELECT TOP 1
+            YEAR(DATEADD(SECOND,
+                CAST(TRY_CAST(startMs AS FLOAT) / 1000.0 AS INT),
+                '19700101')) AS anio,
+            MONTH(DATEADD(SECOND,
+                CAST(TRY_CAST(startMs AS FLOAT) / 1000.0 AS INT),
+                '19700101')) AS mes
+        FROM vwBI_samsaraTrips
+        WHERE TRY_CAST(startMs AS FLOAT) IS NOT NULL
+          AND ISNULL(distanceMeters, 0) > 0
+        ORDER BY TRY_CAST(startMs AS FLOAT) DESC
+    """
+    df = run_query(sql, ())
+    if df.empty:
+        return None
+    return int(df.iloc[0]["anio"]), int(df.iloc[0]["mes"])
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_gps_diagnostico() -> pd.DataFrame:
     """Return 10 raw GPS rows without date filter to inspect startMs format."""
