@@ -373,6 +373,30 @@ def get_samsara_trips_raw(fecha_inicio: str, fecha_fin: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
+def get_gps_meses_disponibles() -> pd.DataFrame:
+    """Return count of GPS trips per year-month available in the DB."""
+    sql = """
+        SELECT
+            YEAR(DATEADD(SECOND,
+                CAST(TRY_CAST(startMs AS FLOAT) / 1000.0 AS INT),
+                '19700101')) AS anio,
+            MONTH(DATEADD(SECOND,
+                CAST(TRY_CAST(startMs AS FLOAT) / 1000.0 AS INT),
+                '19700101')) AS mes,
+            COUNT(*) AS registros,
+            COUNT(DISTINCT idTransporte) AS unidades
+        FROM vwBI_samsaraTrips
+        WHERE TRY_CAST(startMs AS FLOAT) IS NOT NULL
+          AND ISNULL(distanceMeters, 0) > 0
+        GROUP BY
+            YEAR(DATEADD(SECOND, CAST(TRY_CAST(startMs AS FLOAT) / 1000.0 AS INT), '19700101')),
+            MONTH(DATEADD(SECOND, CAST(TRY_CAST(startMs AS FLOAT) / 1000.0 AS INT), '19700101'))
+        ORDER BY anio DESC, mes DESC
+    """
+    return run_query(sql, ())
+
+
+@st.cache_data(ttl=600, show_spinner=False)
 def get_gps_ultimo_mes() -> tuple[int, int] | None:
     """Return (year, month) of the most recent GPS trip in the DB."""
     sql = """

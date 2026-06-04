@@ -1,6 +1,10 @@
 """
 Calendario de Utilización — matriz flota × días del mes.
 Muestra GPS y TMS combinados: huecos visibles de un vistazo.
+
+GPS sources:
+  - vwBI_samsaraTrips (DB):  day-level data, up to Nov 2025
+  - data/gps_html_2026.json: monthly summary, Jan–May 2026
 """
 
 from __future__ import annotations
@@ -18,7 +22,8 @@ import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
 
-from db import get_samsara_trips_raw, get_tms_dias_por_unidad, get_unidades_catalogo, get_gps_diagnostico, get_gps_ultimo_mes
+from db import get_samsara_trips_raw, get_tms_dias_por_unidad, get_unidades_catalogo, get_gps_meses_disponibles
+from gps_html import get_html_gps_for_month, html_has_data, get_html_months
 
 st.set_page_config(
     page_title="Calendario · Transport Analytics",
@@ -53,12 +58,16 @@ with st.sidebar:
 
     hoy = datetime.date.today()
 
-    # Default to last month with GPS data (avoids showing empty GPS for current month)
-    _ultimo = get_gps_ultimo_mes()
-    _def_anio = _ultimo[0] if _ultimo else hoy.year
-    _def_mes  = _ultimo[1] if _ultimo else hoy.month
+    # Default to most recent month that has either DB or HTML GPS data
+    html_months = get_html_months()  # list of (year, month)
+    if html_months:
+        _def_anio, _def_mes = max(html_months)
+    else:
+        _def_anio, _def_mes = hoy.year, hoy.month
 
-    _anios = list(range(min(hoy.year - 3, _def_anio), hoy.year + 1))
+    _anios = sorted(set(
+        list(range(hoy.year - 3, hoy.year + 1)) + [y for y, _ in html_months]
+    ))
     anio_sel = st.selectbox(
         "Año", options=_anios,
         index=_anios.index(_def_anio) if _def_anio in _anios else len(_anios) - 1,
@@ -70,8 +79,12 @@ with st.sidebar:
         format_func=lambda m: MESES_ES[m],
         key="cal_mes",
     )
-    if _ultimo:
-        st.caption(f"Último GPS en BD: {MESES_ES[_ultimo[1]]} {_ultimo[0]}")
+
+    # Show available GPS months as reference
+    html_m_labels = [f"{MESES_ES[m][:3]} {y}" for y, m in sorted(html_months)]
+    if html_m_labels:
+        st.caption(f"GPS HTML disponible: {', '.join(html_m_labels)}")
+
     st.divider()
     st.markdown("**Fuente de datos**")
     fuente = st.radio(
@@ -102,21 +115,19 @@ with st.spinner("Cargando datos..."):
     df_tms_raw = get_tms_dias_por_unidad(fi_str, ff_str)
     df_catalog = get_unidades_catalogo()
 
-# ── GPS diagnostics (always visible) ─────────────────────────────────────────
-with st.expander("🔍 Diagnóstico GPS — ver formato de startMs", expanded=df_gps_raw.empty):
-    df_diag = get_gps_diagnostico()
-    if df_diag.empty:
-        st.error("No se encontraron registros en vwBI_samsaraTrips (sin filtro de fecha).")
-    else:
-        st.caption("Muestra de 10 registros GPS recientes (sin filtro de fecha) para verificar formato de startMs:")
-        st.dataframe(df_diag, use_container_width=True, hide_index=True)
-        st.caption(
-            f"Registros GPS en el período seleccionado: **{len(df_gps_raw)}** · "
-            f"Registros TMS: **{len(df_tms_raw)}**"
-        )
+# ── Determine GPS source ──────────────────────────────────────────────────────
+use_html_gps = df_gps_raw.empty and html_has_data(anio_sel, mes_sel)
+df_html_gps = get_html_gps_for_month(anio_sel, mes_sel) if use_html_gps else pd.DataFrame()
 
-# ── Build GPS active days ─────────────────────────────────────────────────────
-# startMs is Unix epoch milliseconds stored as nvarchar — convert via numeric
+if use_html_gps:
+    st.info(
+        f"Los datos GPS de {MESES_ES[mes_sel]} {anio_sel} provienen del **reporte HTML** "
+        "(resumen mensual por unidad). El desglose día a día no está disponible en esta fuente, "
+        "por lo que el mapa de calor muestra solo actividad TMS.",
+        icon="📊",
+    )
+
+# ── Build GPS active days (DB source — day-level) ─────────────────────────────
 gps_dias: dict[tuple, float] = {}   # (idTransporte, date) → km
 if not df_gps_raw.empty:
     df_gps_raw["startMs_dt"] = pd.to_datetime(
@@ -128,6 +139,29 @@ if not df_gps_raw.empty:
             key = (row["idTransporte"], row["fecha_dia"])
             gps_dias[key] = gps_dias.get(key, 0) + float(row.get("distanceMeters") or 0) / 1000
 
+# ── Build HTML GPS monthly summary (code → idTransporte via catalog) ──────────
+# html_gps_summary: idTransporte → {dias_activos, km, viajes, idle_cal, util_cal}
+html_gps_summary: dict = {}
+if use_html_gps and not df_html_gps.empty and not df_catalog.empty:
+    # Build code → idTransporte map
+    code_to_id: dict = {}
+    for _, crow in df_catalog.iterrows():
+        codigo = str(crow.get("codigo", "")).strip()
+        if codigo:
+            code_to_id[codigo] = crow["idTransporte"]
+
+    for _, row in df_html_gps.iterrows():
+        bus_code = str(row["Bus"]).strip()
+        uid = code_to_id.get(bus_code)
+        if uid is not None:
+            html_gps_summary[uid] = {
+                "dias_activos": int(row.get("dias_activos", 0)),
+                "km":           float(row.get("km", 0)),
+                "viajes":       int(row.get("viajes", 0)),
+                "idle_cal":     int(row.get("idle_cal", 0)),
+                "util_cal":     float(row.get("util_cal", 0)),
+            }
+
 # ── Build TMS active days ─────────────────────────────────────────────────────
 tms_dias: dict[tuple, int] = {}    # (idTransporte, date) → viajes
 if not df_tms_raw.empty:
@@ -138,7 +172,7 @@ if not df_tms_raw.empty:
             tms_dias[key] = tms_dias.get(key, 0) + int(row.get("viajes_dia") or 0)
 
 # ── Collect all units to display ──────────────────────────────────────────────
-ids_gps = set(k[0] for k in gps_dias)
+ids_gps = set(k[0] for k in gps_dias) | set(html_gps_summary.keys())
 ids_tms = set(k[0] for k in tms_dias)
 
 if fuente == "GPS (Samsara)":
@@ -182,12 +216,12 @@ st.markdown("""
 n_units = len(sorted_units)
 n_days  = days_in_month
 
-matrix     = np.zeros((n_units, n_days), dtype=float)
+matrix      = np.zeros((n_units, n_days), dtype=float)
 text_matrix = [["" for _ in range(n_days)] for _ in range(n_units)]
 
 for i, uid in enumerate(sorted_units):
     for j, dia in enumerate(dias_del_mes):
-        has_gps = (uid, dia) in gps_dias
+        has_gps = (uid, dia) in gps_dias  # only day-level from DB
         has_tms = (uid, dia) in tms_dias
         if has_gps and has_tms:
             matrix[i, j] = 3.0
@@ -198,7 +232,6 @@ for i, uid in enumerate(sorted_units):
         else:
             matrix[i, j] = 0.0
 
-        # Tooltip text
         parts = []
         if has_tms:
             parts.append(f"TMS: {tms_dias.get((uid, dia), 0)} viajes")
@@ -216,14 +249,6 @@ colorscale = [
 
 y_labels  = [unit_label(uid) for uid in sorted_units]
 x_labels  = [str(d.day) for d in dias_del_mes]
-
-# Mark weekends
-x_ticks_color = []
-for d in dias_del_mes:
-    if d.weekday() >= 5:  # Sat/Sun
-        x_ticks_color.append("#c0392b")
-    else:
-        x_ticks_color.append("#333333")
 
 fig = go.Figure(data=go.Heatmap(
     z=matrix,
@@ -267,33 +292,47 @@ def nivel_util(pct: float) -> str:
 
 rows_summary = []
 for uid in sorted_units:
-    dias_gps = sum(1 for d in dias_del_mes if (uid, d) in gps_dias)
-    dias_tms = sum(1 for d in dias_del_mes if (uid, d) in tms_dias)
-    dias_match = sum(1 for d in dias_del_mes if (uid, d) in gps_dias and (uid, d) in tms_dias)
+    dias_gps_db  = sum(1 for d in dias_del_mes if (uid, d) in gps_dias)
+    dias_tms     = sum(1 for d in dias_del_mes if (uid, d) in tms_dias)
+    dias_match   = sum(1 for d in dias_del_mes if (uid, d) in gps_dias and (uid, d) in tms_dias)
     dias_tms_only = sum(1 for d in dias_del_mes if (uid, d) in tms_dias and (uid, d) not in gps_dias)
     dias_gps_only = sum(1 for d in dias_del_mes if (uid, d) in gps_dias and (uid, d) not in tms_dias)
-    km_gps = sum(gps_dias.get((uid, d), 0) for d in dias_del_mes)
-    viajes_tms = sum(tms_dias.get((uid, d), 0) for d in dias_del_mes)
+    km_gps_db    = sum(gps_dias.get((uid, d), 0) for d in dias_del_mes)
+    viajes_tms   = sum(tms_dias.get((uid, d), 0) for d in dias_del_mes)
+
+    # Overlay HTML GPS summary when DB has no day-level data
+    html = html_gps_summary.get(uid, {})
+    dias_gps  = html.get("dias_activos", dias_gps_db) if use_html_gps else dias_gps_db
+    km_gps    = html.get("km",           km_gps_db)   if use_html_gps else km_gps_db
+    viajes_gps = html.get("viajes",      0)            if use_html_gps else 0
 
     dias_activos = max(dias_gps, dias_tms)
     pct = round(dias_activos / days_in_month * 100, 1)
 
-    rows_summary.append({
-        "Unidad": unit_label(uid),
-        "Días GPS": dias_gps,
-        "Días TMS": dias_tms,
-        "✅ Ambos": dias_match,
-        "🔵 Solo TMS": dias_tms_only,
-        "🔷 Solo GPS": dias_gps_only,
-        "Huecos": days_in_month - dias_activos,
-        "% Utilización": f"{pct:.1f}%",
-        "Nivel": nivel_util(pct),
-        "Km GPS": f"{km_gps:,.0f}",
-        "Viajes TMS": viajes_tms,
-    })
+    row: dict = {
+        "Unidad":        unit_label(uid),
+        "Días GPS":      dias_gps,
+        "Días TMS":      dias_tms,
+        "Huecos GPS":    days_in_month - dias_gps if dias_gps else "—",
+        "Huecos TMS":    days_in_month - dias_tms,
+        "% Util GPS":    f"{round(dias_gps/days_in_month*100,1):.1f}%" if dias_gps else "—",
+        "% Util TMS":    f"{pct:.1f}%",
+        "Nivel":         nivel_util(pct),
+        "Km GPS":        f"{km_gps:,.0f}" if km_gps else "—",
+        "Viajes TMS":    viajes_tms,
+    }
+    if not use_html_gps:
+        row["✅ Ambos"]    = dias_match
+        row["🔵 Solo TMS"] = dias_tms_only
+        row["🔷 Solo GPS"] = dias_gps_only
+
+    rows_summary.append(row)
 
 df_summary = pd.DataFrame(rows_summary)
 st.dataframe(df_summary, use_container_width=True, hide_index=True)
+
+if use_html_gps:
+    st.caption("⚠️ Días GPS y Km GPS provienen del reporte HTML (resumen mensual por unidad, no detalle por día).")
 
 # ── Per-unit detail expandable ────────────────────────────────────────────────
 st.divider()
@@ -325,22 +364,30 @@ for dia in dias_del_mes:
         estado = "⬜ Inactivo"
 
     detail_rows.append({
-        "Día": dia.strftime("%d/%m/%Y"),
-        "Semana": f"Sem {(dia.day - 1) // 7 + 1}",
+        "Día":       dia.strftime("%d/%m/%Y"),
+        "Semana":    f"Sem {(dia.day - 1) // 7 + 1}",
         "DiaSemana": ["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"][dia.weekday()],
-        "Estado": estado,
-        "Km GPS": round(km, 1) if has_gps else 0,
+        "Estado":    estado,
+        "Km GPS":    round(km, 1) if has_gps else 0,
         "Viajes TMS": viajes if has_tms else 0,
     })
 
 df_detail = pd.DataFrame(detail_rows)
 
 # KPIs for selected unit
-dias_gps_u   = sum(1 for d in dias_del_mes if (uid_sel, d) in gps_dias)
-dias_tms_u   = sum(1 for d in dias_del_mes if (uid_sel, d) in tms_dias)
-huecos_u     = days_in_month - max(dias_gps_u, dias_tms_u)
-km_total_u   = sum(gps_dias.get((uid_sel, d), 0) for d in dias_del_mes)
-pct_u        = round(max(dias_gps_u, dias_tms_u) / days_in_month * 100, 1)
+dias_gps_u  = sum(1 for d in dias_del_mes if (uid_sel, d) in gps_dias)
+dias_tms_u  = sum(1 for d in dias_del_mes if (uid_sel, d) in tms_dias)
+km_total_u  = sum(gps_dias.get((uid_sel, d), 0) for d in dias_del_mes)
+huecos_u    = days_in_month - max(dias_gps_u, dias_tms_u)
+pct_u       = round(max(dias_gps_u, dias_tms_u) / days_in_month * 100, 1)
+
+# Supplement with HTML GPS if DB is empty
+if use_html_gps and uid_sel in html_gps_summary:
+    html_u = html_gps_summary[uid_sel]
+    dias_gps_u = html_u["dias_activos"]
+    km_total_u = html_u["km"]
+    huecos_u   = days_in_month - max(dias_gps_u, dias_tms_u)
+    pct_u      = round(max(dias_gps_u, dias_tms_u) / days_in_month * 100, 1)
 
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Días activos GPS", dias_gps_u)
@@ -349,8 +396,8 @@ c3.metric("Huecos (inactivos)", huecos_u)
 c4.metric("Km GPS totales", f"{km_total_u:,.0f}")
 c5.metric("% Utilización", f"{pct_u:.1f}%")
 
-# Daily km bar chart
-if km_total_u > 0:
+# Daily km bar chart (only for DB GPS mode)
+if km_total_u > 0 and not use_html_gps:
     df_km = df_detail[df_detail["Km GPS"] > 0].copy()
     df_km["Día_dt"] = pd.to_datetime(df_km["Día"], format="%d/%m/%Y")
     fig_km = px.bar(
@@ -359,20 +406,39 @@ if km_total_u > 0:
         labels={"Día_dt": "Fecha", "Km GPS": "Km GPS"},
         height=250,
     )
-    fig_km.update_layout(
-        margin=dict(t=10, b=10),
-        xaxis_tickformat="%d/%m",
-    )
+    fig_km.update_layout(margin=dict(t=10, b=10), xaxis_tickformat="%d/%m")
     st.plotly_chart(fig_km, use_container_width=True)
 
-# Detail table — highlight inactive days
+if use_html_gps:
+    st.info(
+        "El detalle diario GPS no está disponible para este mes (fuente: reporte HTML). "
+        "El mapa muestra solo actividad TMS. Los KPIs GPS son del resumen mensual.",
+        icon="ℹ️",
+    )
+
+# Detail table
 st.dataframe(
     df_detail[["Día", "DiaSemana", "Estado", "Km GPS", "Viajes TMS"]],
     use_container_width=True,
     hide_index=True,
 )
 
+# ── GPS DB months diagnostic ───────────────────────────────────────────────────
+with st.expander("🔍 Meses con datos GPS en BD (vwBI_samsaraTrips)"):
+    df_meses = get_gps_meses_disponibles()
+    if df_meses.empty:
+        st.warning("No se encontraron registros en vwBI_samsaraTrips.")
+    else:
+        MESES_ES_CORTO = {1:"Ene",2:"Feb",3:"Mar",4:"Abr",5:"May",6:"Jun",
+                          7:"Jul",8:"Ago",9:"Sep",10:"Oct",11:"Nov",12:"Dic"}
+        df_meses["Período"] = df_meses.apply(
+            lambda r: f"{MESES_ES_CORTO.get(int(r['mes']), str(int(r['mes'])))} {int(r['anio'])}", axis=1
+        )
+        df_meses = df_meses.rename(columns={"registros": "Registros GPS", "unidades": "Unidades"})
+        st.dataframe(df_meses[["Período","Registros GPS","Unidades"]], use_container_width=True, hide_index=True)
+
 st.caption(
-    f"Fuente: vwBI_samsaraTrips (GPS) + vwBI_trnViajes (TMS) · "
+    f"Fuente GPS: {'HTML reporte 2026' if use_html_gps else 'vwBI_samsaraTrips'} · "
+    f"Fuente TMS: vwBI_trnViajes · "
     f"Nivel utilización: ≥60% Alto · 35-59% Medio · <35% Bajo"
 )
