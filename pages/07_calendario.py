@@ -23,7 +23,10 @@ import plotly.express as px
 import streamlit as st
 
 from db import get_samsara_trips_raw, get_tms_dias_por_unidad, get_unidades_catalogo, get_gps_meses_disponibles
-from gps_html import get_html_gps_for_month, html_has_data, get_html_months
+from gps_html import (
+    best_gps_source, get_excel_gps_days, get_excel_trips_for_month,
+    get_html_gps_for_month, get_all_gps_months,
+)
 
 st.set_page_config(
     page_title="Calendario · Transport Analytics",
@@ -58,15 +61,15 @@ with st.sidebar:
 
     hoy = datetime.date.today()
 
-    # Default to most recent month that has either DB or HTML GPS data
-    html_months = get_html_months()  # list of (year, month)
-    if html_months:
-        _def_anio, _def_mes = max(html_months)
+    # Default to most recent month with any GPS data (Excel or HTML)
+    all_gps_months = get_all_gps_months()
+    if all_gps_months:
+        _def_anio, _def_mes = max(all_gps_months)
     else:
         _def_anio, _def_mes = hoy.year, hoy.month
 
     _anios = sorted(set(
-        list(range(hoy.year - 3, hoy.year + 1)) + [y for y, _ in html_months]
+        list(range(hoy.year - 3, hoy.year + 1)) + [y for y, _ in all_gps_months]
     ))
     anio_sel = st.selectbox(
         "Año", options=_anios,
@@ -80,10 +83,10 @@ with st.sidebar:
         key="cal_mes",
     )
 
-    # Show available GPS months as reference
-    html_m_labels = [f"{MESES_ES[m][:3]} {y}" for y, m in sorted(html_months)]
-    if html_m_labels:
-        st.caption(f"GPS HTML disponible: {', '.join(html_m_labels)}")
+    # Show available GPS months
+    if all_gps_months:
+        labels = [f"{MESES_ES[m][:3]} {y}" for y, m in sorted(all_gps_months)]
+        st.caption(f"GPS disponible: {', '.join(labels)}")
 
     st.divider()
     st.markdown("**Fuente de datos**")
@@ -115,21 +118,35 @@ with st.spinner("Cargando datos..."):
     df_tms_raw = get_tms_dias_por_unidad(fi_str, ff_str)
     df_catalog = get_unidades_catalogo()
 
-# ── Determine GPS source ──────────────────────────────────────────────────────
-use_html_gps = df_gps_raw.empty and html_has_data(anio_sel, mes_sel)
-df_html_gps = get_html_gps_for_month(anio_sel, mes_sel) if use_html_gps else pd.DataFrame()
+# ── Build catalog code → idTransporte map ────────────────────────────────────
+code_to_id: dict = {}
+if not df_catalog.empty:
+    for _, crow in df_catalog.iterrows():
+        codigo = str(crow.get("codigo", "")).strip()
+        if codigo:
+            code_to_id[codigo] = crow["idTransporte"]
 
-if use_html_gps:
+# ── Determine GPS source ──────────────────────────────────────────────────────
+# Priority: DB (day-level) > Excel files (day-level) > HTML (monthly summary)
+gps_source = "db" if not df_gps_raw.empty else best_gps_source(anio_sel, mes_sel)
+
+if gps_source == "excel":
     st.info(
-        f"Los datos GPS de {MESES_ES[mes_sel]} {anio_sel} provienen del **reporte HTML** "
-        "(resumen mensual por unidad). El desglose día a día no está disponible en esta fuente, "
-        "por lo que el mapa de calor muestra solo actividad TMS.",
+        f"GPS de {MESES_ES[mes_sel]} {anio_sel} — fuente: **archivos Excel Samsara** "
+        f"(detalle por día disponible).",
+        icon="📊",
+    )
+elif gps_source == "html":
+    st.info(
+        f"GPS de {MESES_ES[mes_sel]} {anio_sel} — fuente: **reporte HTML** "
+        "(resumen mensual, sin detalle por día — el heatmap muestra solo TMS).",
         icon="📊",
     )
 
-# ── Build GPS active days (DB source — day-level) ─────────────────────────────
+# ── Build GPS active days ─────────────────────────────────────────────────────
 gps_dias: dict[tuple, float] = {}   # (idTransporte, date) → km
-if not df_gps_raw.empty:
+
+if gps_source == "db" and not df_gps_raw.empty:
     df_gps_raw["startMs_dt"] = pd.to_datetime(
         pd.to_numeric(df_gps_raw["startMs"], errors="coerce"), unit="ms", errors="coerce"
     )
@@ -139,28 +156,26 @@ if not df_gps_raw.empty:
             key = (row["idTransporte"], row["fecha_dia"])
             gps_dias[key] = gps_dias.get(key, 0) + float(row.get("distanceMeters") or 0) / 1000
 
-# ── Build HTML GPS monthly summary (code → idTransporte via catalog) ──────────
-# html_gps_summary: idTransporte → {dias_activos, km, viajes, idle_cal, util_cal}
-html_gps_summary: dict = {}
-if use_html_gps and not df_html_gps.empty and not df_catalog.empty:
-    # Build code → idTransporte map
-    code_to_id: dict = {}
-    for _, crow in df_catalog.iterrows():
-        codigo = str(crow.get("codigo", "")).strip()
-        if codigo:
-            code_to_id[codigo] = crow["idTransporte"]
+elif gps_source == "excel":
+    gps_dias = get_excel_gps_days(anio_sel, mes_sel, code_to_id)
 
-    for _, row in df_html_gps.iterrows():
-        bus_code = str(row["Bus"]).strip()
-        uid = code_to_id.get(bus_code)
-        if uid is not None:
-            html_gps_summary[uid] = {
-                "dias_activos": int(row.get("dias_activos", 0)),
-                "km":           float(row.get("km", 0)),
-                "viajes":       int(row.get("viajes", 0)),
-                "idle_cal":     int(row.get("idle_cal", 0)),
-                "util_cal":     float(row.get("util_cal", 0)),
-            }
+# ── Build HTML GPS monthly summary (fallback, no day-level) ──────────────────
+html_gps_summary: dict = {}
+use_html_gps = (gps_source == "html")
+if use_html_gps:
+    df_html_gps = get_html_gps_for_month(anio_sel, mes_sel)
+    if not df_html_gps.empty:
+        for _, row in df_html_gps.iterrows():
+            bus_code = str(row["Bus"]).strip()
+            uid = code_to_id.get(bus_code)
+            if uid is not None:
+                html_gps_summary[uid] = {
+                    "dias_activos": int(row.get("dias_activos", 0)),
+                    "km":           float(row.get("km", 0)),
+                    "viajes":       int(row.get("viajes", 0)),
+                    "idle_cal":     int(row.get("idle_cal", 0)),
+                    "util_cal":     float(row.get("util_cal", 0)),
+                }
 
 # ── Build TMS active days ─────────────────────────────────────────────────────
 tms_dias: dict[tuple, int] = {}    # (idTransporte, date) → viajes
@@ -437,8 +452,10 @@ with st.expander("🔍 Meses con datos GPS en BD (vwBI_samsaraTrips)"):
         df_meses = df_meses.rename(columns={"registros": "Registros GPS", "unidades": "Unidades"})
         st.dataframe(df_meses[["Período","Registros GPS","Unidades"]], use_container_width=True, hide_index=True)
 
+_src_label = {"db": "vwBI_samsaraTrips", "excel": "Excel Samsara 2026",
+              "html": "HTML reporte 2026", "none": "sin datos GPS"}
 st.caption(
-    f"Fuente GPS: {'HTML reporte 2026' if use_html_gps else 'vwBI_samsaraTrips'} · "
+    f"Fuente GPS: {_src_label.get(gps_source, gps_source)} · "
     f"Fuente TMS: vwBI_trnViajes · "
     f"Nivel utilización: ≥60% Alto · 35-59% Medio · <35% Bajo"
 )
