@@ -22,29 +22,18 @@ from db import (
     get_tms_dias_por_unidad,
     get_gps_dias_por_unidad,
 )
+from theme import apply_theme, sidebar_header
 
 st.set_page_config(
     page_title="Reconciliación TMS vs GPS · Transport Analytics",
     page_icon="🔍",
     layout="wide",
 )
+apply_theme()
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown(
-        """
-        <div style='text-align:center; padding: 1rem 0 1.5rem 0;'>
-            <span style='font-size:2.5rem;'>🚛</span><br>
-            <span style='font-size:1.3rem; font-weight:700; color:#1f77b4;'>
-                Transport Analytics
-            </span><br>
-            <span style='font-size:0.75rem; color:#888;'>
-                México — USA Cross-Border
-            </span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    sidebar_header()
     st.divider()
     st.markdown("**Filtros de fecha**")
 

@@ -18,12 +18,14 @@ import streamlit as st
 
 from db import get_samsara_trips_raw, get_unidades_catalogo
 from gps_html import build_df_raw_from_excel, get_all_gps_months, best_gps_source
+from theme import apply_theme, sidebar_header
 
 st.set_page_config(
     page_title="GPS Samsara · Transport Analytics",
     page_icon="📡",
     layout="wide",
 )
+apply_theme()
 
 
 # ── GPS block algorithm ───────────────────────────────────────────────────────
@@ -101,20 +103,7 @@ def nivel_utilizacion(pct: float) -> str:
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown(
-        """
-        <div style='text-align:center; padding: 1rem 0 1.5rem 0;'>
-            <span style='font-size:2.5rem;'>🚛</span><br>
-            <span style='font-size:1.3rem; font-weight:700; color:#1f77b4;'>
-                Transport Analytics
-            </span><br>
-            <span style='font-size:0.75rem; color:#888;'>
-                México — USA Cross-Border
-            </span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    sidebar_header()
     st.divider()
     st.markdown("**Filtros de fecha**")
 
@@ -269,17 +258,38 @@ df_util["etiqueta_unidad"] = df_util.apply(
     axis=1,
 )
 
+# ── Add catalog units with zero GPS activity ──────────────────────────────────
+active_gps_ids = set(df_util["idTransporte"].tolist())
+zero_gps_rows = []
+for _, crow in df_catalog.iterrows():
+    uid = crow["idTransporte"]
+    if uid not in active_gps_ids:
+        nombre = str(crow.get("nombre", "") or "")
+        zero_gps_rows.append({
+            "idTransporte":  uid,
+            "nombreUnidad":  nombre,
+            "placasMx":      str(crow.get("placasMx", "") or ""),
+            "dias_activos":  0,
+            "pct_utilizacion": 0.0,
+            "nivel":         "Sin datos",
+            "etiqueta_unidad": nombre if nombre else f"Unidad {uid}",
+        })
+if zero_gps_rows:
+    df_util = pd.concat([df_util, pd.DataFrame(zero_gps_rows)], ignore_index=True)
+
 # ── KPIs ─────────────────────────────────────────────────────────────────────
-total_bloques    = df_bloque_agg["bloqueGPS"].nunique()
-total_km         = float(df_bloque_agg["km_totales"].sum())
-total_unidades   = int(df_util["idTransporte"].nunique())
-avg_utilizacion  = float(df_util["pct_utilizacion"].mean())
-n_flag           = int(df_bloque_agg["flag_revision"].sum())
+total_bloques      = df_bloque_agg["bloqueGPS"].nunique()
+total_km           = float(df_bloque_agg["km_totales"].sum())
+total_unidades_cat = len(df_util)
+unidades_activas   = int(active_gps_ids.__len__())
+unidades_sin_gps   = total_unidades_cat - unidades_activas
+avg_utilizacion    = float(df_util[df_util["pct_utilizacion"] > 0]["pct_utilizacion"].mean()) if unidades_activas > 0 else 0.0
+n_flag             = int(df_bloque_agg["flag_revision"].sum())
 
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Total bloques GPS", f"{total_bloques:,}")
 col2.metric("Km totales GPS", f"{total_km:,.1f}")
-col3.metric("Unidades con actividad", f"{total_unidades:,}")
+col3.metric("Unidades con GPS", f"{unidades_activas:,}", delta=f"{unidades_sin_gps} sin datos" if unidades_sin_gps else None, delta_color="inverse")
 col4.metric("% Utilización promedio", f"{avg_utilizacion:.1f}%")
 col5.metric("Bloques > 4 días (revisar)", f"{n_flag:,}")
 
@@ -295,7 +305,7 @@ st.divider()
 # ── Utilization by unit — bar chart ──────────────────────────────────────────
 st.subheader("Utilización por unidad (% días activos en el período)")
 
-NIVEL_COLOR_MAP = {"Alto": "#2ca02c", "Medio": "#ff7f0e", "Bajo": "#d62728"}
+NIVEL_COLOR_MAP = {"Alto": "#2ca02c", "Medio": "#ff7f0e", "Bajo": "#d62728", "Sin datos": "#A8A8A8"}
 
 df_util_sorted = df_util.sort_values("pct_utilizacion", ascending=True)
 fig_util = px.bar(
@@ -305,7 +315,7 @@ fig_util = px.bar(
     orientation="h",
     color="nivel",
     color_discrete_map=NIVEL_COLOR_MAP,
-    text=df_util_sorted["pct_utilizacion"].apply(lambda x: f"{x:.1f}%"),
+    text=df_util_sorted.apply(lambda r: f"{r['pct_utilizacion']:.1f}%" if r["pct_utilizacion"] > 0 else "Sin datos GPS", axis=1),
     labels={
         "pct_utilizacion":  "% Utilización",
         "etiqueta_unidad":  "Unidad",
@@ -315,7 +325,7 @@ fig_util = px.bar(
 )
 fig_util.update_traces(textposition="outside")
 fig_util.update_layout(
-    margin=dict(t=20, b=10, l=10, r=60),
+    margin=dict(t=20, b=10, l=10, r=80),
     yaxis_title="",
     xaxis_title="% Utilización",
 )
@@ -472,3 +482,14 @@ st.caption(
     f"Período: {fecha_inicio.strftime('%d/%m/%Y')} — {fecha_fin.strftime('%d/%m/%Y')} · "
     "Fuente: vwBI_samsaraTrips"
 )
+
+# ── Units with no GPS data (requires validation) ──────────────────────────────
+df_sin_gps = df_util[df_util["dias_activos"] == 0].copy() if "dias_activos" in df_util.columns else df_util[df_util["pct_utilizacion"] == 0].copy()
+if not df_sin_gps.empty:
+    st.divider()
+    st.subheader(f"⚫ Unidades sin datos GPS en el período ({len(df_sin_gps)})")
+    st.caption("Estas unidades están en catálogo pero no generaron registros GPS. El responsable debe validar si estuvieron inactivas, fuera de servicio, o si hay problema con el dispositivo Samsara.")
+    df_sin_gps_table = df_sin_gps[["etiqueta_unidad", "placasMx"]].rename(columns={
+        "etiqueta_unidad": "Unidad", "placasMx": "Placas MX",
+    })
+    st.dataframe(df_sin_gps_table, use_container_width=True, hide_index=True)

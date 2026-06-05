@@ -16,30 +16,19 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from db import get_flota_utilizacion
+from db import get_flota_utilizacion, get_unidades_catalogo
+from theme import apply_theme, sidebar_header
 
 st.set_page_config(
     page_title="Flota · Transport Analytics",
     page_icon="🚌",
     layout="wide",
 )
+apply_theme()
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown(
-        """
-        <div style='text-align:center; padding: 1rem 0 1.5rem 0;'>
-            <span style='font-size:2.5rem;'>🚛</span><br>
-            <span style='font-size:1.3rem; font-weight:700; color:#1f77b4;'>
-                Transport Analytics
-            </span><br>
-            <span style='font-size:0.75rem; color:#888;'>
-                México — USA Cross-Border
-            </span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    sidebar_header()
     st.divider()
     st.markdown("**Filtros**")
 
@@ -68,7 +57,29 @@ ff_str = fecha_fin.strftime("%Y-%m-%d")
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 with st.spinner("Cargando estadísticas de flota..."):
-    df = get_flota_utilizacion(fi_str, ff_str)
+    df       = get_flota_utilizacion(fi_str, ff_str)
+    df_cat   = get_unidades_catalogo()
+
+# ── Merge catalog to add units with zero activity ─────────────────────────────
+if not df_cat.empty:
+    active_ids = set(df["idTransporte"].tolist()) if not df.empty else set()
+    zero_rows = []
+    for _, crow in df_cat.iterrows():
+        if crow["idTransporte"] not in active_ids:
+            zero_rows.append({
+                "idTransporte":  crow["idTransporte"],
+                "nombreUnidad":  crow.get("nombre", ""),
+                "placasMx":      crow.get("placasMx", ""),
+                "marca":         crow.get("marca", ""),
+                "modelo":        crow.get("modelo", ""),
+                "viajes_unicos": 0,
+                "total_miles":   0.0,
+                "total_revenue": 0.0,
+                "total_expenses":0.0,
+                "dias_con_viaje":0,
+            })
+    if zero_rows:
+        df = pd.concat([df, pd.DataFrame(zero_rows)], ignore_index=True)
 
 if df.empty:
     st.warning("No se encontraron datos de flota para el período seleccionado.")
@@ -86,8 +97,10 @@ def nivel_utilizacion(pct: float) -> str:
         return "Alto"
     elif pct >= 35:
         return "Medio"
-    else:
+    elif pct > 0:
         return "Bajo"
+    else:
+        return "Sin datos"
 
 df["nivel_utilizacion"] = df["pct_utilizacion"].apply(nivel_utilizacion)
 df["margen"] = df["total_revenue"].fillna(0) - df["total_expenses"].fillna(0)
@@ -99,18 +112,22 @@ df["etiqueta"] = df.apply(
     axis=1,
 )
 
-df_top = df.head(top_n).copy()
+# Sort: active units by revenue desc, zero-activity at bottom
+df = df.sort_values(["viajes_unicos", "total_revenue"], ascending=[False, False]).reset_index(drop=True)
+df_top = df[df["viajes_unicos"] > 0].head(top_n).copy()
 
 # ── Summary metrics ───────────────────────────────────────────────────────────
 total_unidades   = len(df)
+unidades_activas = int((df["viajes_unicos"] > 0).sum())
+unidades_sin_op  = total_unidades - unidades_activas
 total_viajes     = int(df["viajes_unicos"].sum())
 total_miles      = float(df["total_miles"].fillna(0).sum())
 total_revenue    = float(df["total_revenue"].fillna(0).sum())
 total_expenses   = float(df["total_expenses"].fillna(0).sum())
-avg_utilizacion  = float(df["pct_utilizacion"].mean())
+avg_utilizacion  = float(df[df["pct_utilizacion"] > 0]["pct_utilizacion"].mean()) if (df["pct_utilizacion"] > 0).any() else 0.0
 
 col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Unidades activas", f"{total_unidades:,}")
+col1.metric("Total unidades", f"{total_unidades:,}", delta=f"{unidades_sin_op} sin operación" if unidades_sin_op else None, delta_color="inverse")
 col2.metric("Total viajes únicos", f"{total_viajes:,}")
 col3.metric("Total millas", f"{total_miles:,.0f}")
 col4.metric("Ingresos totales (USD)", f"${total_revenue:,.2f}")
@@ -192,7 +209,7 @@ st.divider()
 st.subheader("Tabla de utilización por unidad")
 st.caption(
     f"Período de {days_in_period} días · "
-    "Nivel: >= 60% Alto (verde), 35-59% Medio (amarillo), < 35% Bajo (rojo)"
+    "Nivel: >= 60% Alto (verde), 35-59% Medio (amarillo), < 35% Bajo (rojo), ⚫ Sin datos (requiere validación)"
 )
 
 df_table = df[[
@@ -201,9 +218,9 @@ df_table = df[[
     "margen", "dias_con_viaje", "pct_utilizacion", "nivel_utilizacion",
 ]].copy()
 
-NIVEL_COLOR = {"Alto": "🟢", "Medio": "🟡", "Bajo": "🔴"}
+NIVEL_COLOR = {"Alto": "🟢", "Medio": "🟡", "Bajo": "🔴", "Sin datos": "⚫"}
 df_table["nivel_utilizacion"] = df_table["nivel_utilizacion"].apply(
-    lambda n: f"{NIVEL_COLOR.get(n, '')} {n}"
+    lambda n: f"{NIVEL_COLOR.get(n, '⚫')} {n}"
 )
 
 for col_name in ["total_revenue", "total_expenses", "margen"]:
@@ -234,7 +251,18 @@ df_table = df_table.rename(columns={
 
 st.dataframe(df_table, use_container_width=True, hide_index=True)
 st.caption(
-    f"Total: {total_unidades} unidades · "
+    f"Total: {total_unidades} unidades ({unidades_activas} con operación, {unidades_sin_op} sin operación) · "
     f"Período: {fecha_inicio.strftime('%d/%m/%Y')} — {fecha_fin.strftime('%d/%m/%Y')} · "
     "Fuente: vwBI_trnViajes + vwBI_trnTransporte"
 )
+
+# ── Units with no operation (alert panel) ─────────────────────────────────────
+df_sin_op = df[df["viajes_unicos"] == 0].copy()
+if not df_sin_op.empty:
+    st.divider()
+    st.subheader(f"⚫ Unidades sin operación identificada ({len(df_sin_op)})")
+    st.caption("Estas unidades están en catálogo pero no tienen viajes registrados en el período. El responsable debe validar.")
+    df_sin_op_table = df_sin_op[["etiqueta", "placasMx", "marca", "modelo"]].rename(columns={
+        "etiqueta": "Unidad", "placasMx": "Placas MX", "marca": "Marca", "modelo": "Modelo",
+    })
+    st.dataframe(df_sin_op_table, use_container_width=True, hide_index=True)

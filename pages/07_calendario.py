@@ -27,12 +27,14 @@ from gps_html import (
     best_gps_source, get_excel_gps_days, get_excel_trips_for_month,
     get_html_gps_for_month, get_all_gps_months,
 )
+from theme import apply_theme, sidebar_header
 
 st.set_page_config(
     page_title="Calendario · Transport Analytics",
     page_icon="📅",
     layout="wide",
 )
+apply_theme()
 
 MESES_ES = {
     1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
@@ -42,20 +44,7 @@ MESES_ES = {
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown(
-        """
-        <div style='text-align:center; padding: 1rem 0 1.5rem 0;'>
-            <span style='font-size:2.5rem;'>🚛</span><br>
-            <span style='font-size:1.3rem; font-weight:700; color:#1f77b4;'>
-                Transport Analytics
-            </span><br>
-            <span style='font-size:0.75rem; color:#888;'>
-                México — USA Cross-Border
-            </span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    sidebar_header()
     st.divider()
     st.markdown("**Período**")
 
@@ -189,13 +178,15 @@ if not df_tms_raw.empty:
 # ── Collect all units to display ──────────────────────────────────────────────
 ids_gps = set(k[0] for k in gps_dias) | set(html_gps_summary.keys())
 ids_tms = set(k[0] for k in tms_dias)
+ids_catalog = set(df_catalog["idTransporte"].tolist()) if not df_catalog.empty else set()
 
+# Always include all catalog units so zero-activity ones are visible for validation
 if fuente == "GPS (Samsara)":
-    ids_show = ids_gps
+    ids_show = ids_gps | ids_catalog
 elif fuente == "TMS (Sistema)":
-    ids_show = ids_tms
+    ids_show = ids_tms | ids_catalog
 else:
-    ids_show = ids_gps | ids_tms
+    ids_show = ids_gps | ids_tms | ids_catalog
 
 # Build label map from catalog
 label_map: dict = {}
@@ -218,11 +209,11 @@ if not sorted_units:
 
 # ── Legend ────────────────────────────────────────────────────────────────────
 st.markdown("""
-<div style="display:flex;gap:20px;align-items:center;margin-bottom:8px;font-size:13px;">
-  <span><span style="background:#2ca02c;padding:2px 10px;border-radius:3px;color:white">GPS + TMS</span></span>
-  <span><span style="background:#1f77b4;padding:2px 10px;border-radius:3px;color:white">Solo TMS</span></span>
-  <span><span style="background:#17becf;padding:2px 10px;border-radius:3px;color:white">Solo GPS</span></span>
-  <span><span style="background:#e0e0e0;padding:2px 10px;border-radius:3px;color:#666">Inactivo (hueco)</span></span>
+<div style="display:flex;gap:20px;align-items:center;margin-bottom:8px;font-size:11px;flex-wrap:wrap;">
+  <span><span style="background:#00823B;padding:2px 10px;color:white;font-weight:700">GPS + TMS</span></span>
+  <span><span style="background:#005587;padding:2px 10px;color:white;font-weight:700">Solo TMS</span></span>
+  <span><span style="background:#00A0C6;padding:2px 10px;color:white;font-weight:700">Solo GPS</span></span>
+  <span><span style="background:#e0e0e0;padding:2px 10px;color:#666">⚫ Sin operación (validar)</span></span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -254,12 +245,12 @@ for i, uid in enumerate(sorted_units):
             parts.append(f"GPS: {gps_dias.get((uid, dia), 0):.0f} km")
         text_matrix[i][j] = f"Día {dia.day}<br>" + "<br>".join(parts) if parts else f"Día {dia.day}<br>Sin actividad"
 
-# Color scale: 0=gray, 1=blue(TMS), 2=teal(GPS), 3=green(ambos)
+# Color scale: 0=gray(sin op), 1=blue(TMS), 2=teal(GPS), 3=green(ambos)
 colorscale = [
     [0.00, "#e0e0e0"], [0.24, "#e0e0e0"],
-    [0.25, "#1f77b4"], [0.49, "#1f77b4"],
-    [0.50, "#17becf"], [0.74, "#17becf"],
-    [0.75, "#2ca02c"], [1.00, "#2ca02c"],
+    [0.25, "#005587"], [0.49, "#005587"],
+    [0.50, "#00A0C6"], [0.74, "#00A0C6"],
+    [0.75, "#00823B"], [1.00, "#00823B"],
 ]
 
 y_labels  = [unit_label(uid) for uid in sorted_units]
@@ -301,9 +292,10 @@ st.plotly_chart(fig, use_container_width=True)
 st.subheader("Resumen por unidad")
 
 def nivel_util(pct: float) -> str:
-    if pct >= 60: return "🟢 Alto"
-    if pct >= 35: return "🟡 Medio"
-    return "🔴 Bajo"
+    if pct >= 60:   return "🟢 Alto"
+    if pct >= 35:   return "🟡 Medio"
+    if pct > 0:     return "🔴 Bajo"
+    return "⚫ Sin operación"
 
 rows_summary = []
 for uid in sorted_units:
@@ -348,6 +340,20 @@ st.dataframe(df_summary, use_container_width=True, hide_index=True)
 
 if use_html_gps:
     st.caption("⚠️ Días GPS y Km GPS provienen del reporte HTML (resumen mensual por unidad, no detalle por día).")
+
+# ── Units with no activity at all ─────────────────────────────────────────────
+sin_op = [unit_label(uid) for uid in sorted_units
+          if (uid, ) not in {(k[0],) for k in gps_dias}
+          and uid not in html_gps_summary
+          and not any((uid, d) in tms_dias for d in dias_del_mes)]
+if sin_op:
+    st.divider()
+    st.subheader(f"⚫ Unidades sin operación identificada ({len(sin_op)})")
+    st.caption(
+        f"Sin actividad GPS ni TMS en {MESES_ES[mes_sel]} {anio_sel}. "
+        "El responsable debe validar si estuvieron inactivas, en mantenimiento, o sin asignación."
+    )
+    st.dataframe(pd.DataFrame({"Unidad": sin_op}), use_container_width=True, hide_index=True)
 
 # ── Per-unit detail expandable ────────────────────────────────────────────────
 st.divider()
