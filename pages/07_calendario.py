@@ -27,13 +27,9 @@ from gps_html import (
     best_gps_source, get_excel_gps_days, get_excel_trips_for_month,
     get_html_gps_for_month, get_all_gps_months,
 )
-from theme import apply_theme, sidebar_header
+from theme import apply_theme, sidebar_header, page_header, kpi_cards, panel_header, insight
 
-st.set_page_config(
-    page_title="Calendario · Transport Analytics",
-    page_icon="📅",
-    layout="wide",
-)
+st.set_page_config(page_title="Calendario · Transport Analytics", page_icon="📅", layout="wide")
 apply_theme()
 
 MESES_ES = {
@@ -98,8 +94,12 @@ days_in_month = (ultimo_dia - primer_dia).days + 1
 dias_del_mes  = [primer_dia + datetime.timedelta(days=i) for i in range(days_in_month)]
 
 # ── Page header ───────────────────────────────────────────────────────────────
-st.title("📅 Calendario de Utilización")
-st.caption(f"{MESES_ES[mes_sel]} {anio_sel} · {days_in_month} días")
+page_header(
+    "Calendario de Utilización",
+    f"Matriz Flota × Días · {MESES_ES[mes_sel]} {anio_sel}",
+    "Huecos GPS y TMS visibles de un vistazo · Verde = ambos sistemas · Azul = solo TMS · Cyan = solo GPS",
+    meta=f"<strong>{days_in_month} días</strong> del mes",
+)
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 with st.spinner("Cargando datos..."):
@@ -288,8 +288,29 @@ fig.update_layout(
 
 st.plotly_chart(fig, use_container_width=True)
 
-# ── Summary KPI table ─────────────────────────────────────────────────────────
-st.subheader("Resumen por unidad")
+# ── Summary KPI row ───────────────────────────────────────────────────────────
+n_gps_active = len(set(k[0] for k in gps_dias) | set(html_gps_summary.keys()))
+n_tms_active = len(set(k[0] for k in tms_dias))
+n_sin_op     = len([uid for uid in sorted_units
+                    if uid not in {k[0] for k in gps_dias}
+                    and uid not in html_gps_summary
+                    and not any((uid, d) in tms_dias for d in dias_del_mes)])
+n_total      = len(sorted_units)
+
+kpi_cards([
+    {"label": "Unidades totales",  "value": str(n_total),      "sub": "en catálogo"},
+    {"label": "Activas GPS",       "value": str(n_gps_active), "color": "teal"},
+    {"label": "Activas TMS",       "value": str(n_tms_active), "color": "blue"},
+    {"label": "Sin operación",     "value": str(n_sin_op),
+     "sub": "requieren validación",
+     "color": "red" if n_sin_op > 0 else "green"},
+    {"label": "Días del mes",      "value": str(days_in_month), "sub": f"{MESES_ES[mes_sel]} {anio_sel}"},
+])
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# ── Summary table ─────────────────────────────────────────────────────────────
+panel_header("Resumen por Unidad", "Días activos GPS y TMS · utilización vs días del mes")
 
 def nivel_util(pct: float) -> str:
     if pct >= 60:   return "🟢 Alto"
@@ -343,21 +364,22 @@ if use_html_gps:
 
 # ── Units with no activity at all ─────────────────────────────────────────────
 sin_op = [unit_label(uid) for uid in sorted_units
-          if (uid, ) not in {(k[0],) for k in gps_dias}
+          if uid not in {k[0] for k in gps_dias}
           and uid not in html_gps_summary
           and not any((uid, d) in tms_dias for d in dias_del_mes)]
 if sin_op:
     st.divider()
-    st.subheader(f"⚫ Unidades sin operación identificada ({len(sin_op)})")
-    st.caption(
-        f"Sin actividad GPS ni TMS en {MESES_ES[mes_sel]} {anio_sel}. "
-        "El responsable debe validar si estuvieron inactivas, en mantenimiento, o sin asignación."
+    insight(
+        f"Sin operación identificada · {len(sin_op)} unidades · {MESES_ES[mes_sel]} {anio_sel}",
+        "Sin actividad GPS ni TMS en el período. <strong>El responsable debe validar</strong>: "
+        "inactivas, en mantenimiento, fuera de ruta o problema con dispositivo Samsara.",
+        kind="d",
     )
     st.dataframe(pd.DataFrame({"Unidad": sin_op}), use_container_width=True, hide_index=True)
 
-# ── Per-unit detail expandable ────────────────────────────────────────────────
+# ── Per-unit detail ────────────────────────────────────────────────────────────
 st.divider()
-st.subheader("Detalle por unidad")
+panel_header("Detalle por Unidad", "Actividad diaria GPS y TMS")
 
 unidad_detail = st.selectbox(
     "Seleccionar unidad para ver detalle diario:",
@@ -410,12 +432,16 @@ if use_html_gps and uid_sel in html_gps_summary:
     huecos_u   = days_in_month - max(dias_gps_u, dias_tms_u)
     pct_u      = round(max(dias_gps_u, dias_tms_u) / days_in_month * 100, 1)
 
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Días activos GPS", dias_gps_u)
-c2.metric("Días activos TMS", dias_tms_u)
-c3.metric("Huecos (inactivos)", huecos_u)
-c4.metric("Km GPS totales", f"{km_total_u:,.0f}")
-c5.metric("% Utilización", f"{pct_u:.1f}%")
+from theme import PLOTLY_LAYOUT, TEAL, GREEN_PRIMARY
+kpi_cards([
+    {"label": "Días activos GPS",  "value": str(dias_gps_u),       "color": "teal"},
+    {"label": "Días activos TMS",  "value": str(dias_tms_u),       "color": "blue"},
+    {"label": "Huecos (inactivos)","value": str(huecos_u),
+     "color": "red" if huecos_u > days_in_month * 0.4 else "amber"},
+    {"label": "Km GPS totales",    "value": f"{km_total_u:,.0f}",  "color": "green"},
+    {"label": "% Utilización",     "value": f"{pct_u:.1f}%",
+     "color": "green" if pct_u >= 60 else ("amber" if pct_u >= 35 else "red")},
+])
 
 # Daily km bar chart (only for DB GPS mode)
 if km_total_u > 0 and not use_html_gps:
@@ -423,11 +449,11 @@ if km_total_u > 0 and not use_html_gps:
     df_km["Día_dt"] = pd.to_datetime(df_km["Día"], format="%d/%m/%Y")
     fig_km = px.bar(
         df_km, x="Día_dt", y="Km GPS",
-        color_discrete_sequence=["#17becf"],
+        color_discrete_sequence=[TEAL],
         labels={"Día_dt": "Fecha", "Km GPS": "Km GPS"},
-        height=250,
+        height=220,
     )
-    fig_km.update_layout(margin=dict(t=10, b=10), xaxis_tickformat="%d/%m")
+    fig_km.update_layout(**PLOTLY_LAYOUT, xaxis_tickformat="%d/%m", margin=dict(t=10,b=10))
     st.plotly_chart(fig_km, use_container_width=True)
 
 if use_html_gps:
